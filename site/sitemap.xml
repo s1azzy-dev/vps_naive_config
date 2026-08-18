@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://{{env "DOMAIN"}}/</loc></url>
+  <url><loc>https://{{env "DOMAIN"}}/about/</loc></url>
+  <url><loc>https://{{env "DOMAIN"}}/notes/</loc></url>
+  <url><loc>https://{{env "DOMAIN"}}/notes/keeping-services-boring.html</loc></url>
+  <url><loc>https://{{env "DOMAIN"}}/notes/reading-a-route.html</loc></url>
+  <url><loc>https://{{env "DOMAIN"}}/notes/useful-checklists.html</loc></url>
+</urlset>

@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install static-check dependencies
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Create fake environment
+        run: |
+          umask 077
+          printf '%s\n' \
+            'DOMAIN=ci.example' \
+            'ACME_EMAIL=ci@example.com' \
+            'NAIVE_USER=0011223344556677' \
+            'NAIVE_PASSWORD=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff' \
+            > /tmp/naive-gateway-ci.env
+      - name: Static tests
+        env:
+          REQUIRE_SHELLCHECK: "1"
+        run: ./tests/run.sh
+      - name: Build pinned custom Caddy
+        run: docker compose --env-file versions.env --env-file /tmp/naive-gateway-ci.env -f compose.yml build
+      - name: Validate exact Caddy configuration
+        run: |
+          docker compose --env-file versions.env --env-file /tmp/naive-gateway-ci.env -f compose.yml \
+            run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          docker compose --env-file versions.env --env-file /tmp/naive-gateway-ci.env -f compose.yml \
+            run --rm --no-deps caddy caddy list-modules | grep -Fx http.handlers.forward_proxy
+      - name: Runtime smoke test
+        run: ./tests/smoke-local.sh
+      - name: Confirm no tracked secret file
+        run: test -z "$(git ls-files .env)"

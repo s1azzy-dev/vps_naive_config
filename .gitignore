@@ -1,0 +1,7 @@
+.env
+backups/*
+!backups/.gitkeep
+*.tmp
+*.bak
+.DS_Store
+

@@ -1,0 +1,34 @@
+{
+	order forward_proxy before file_server
+
+	# Keep runtime diagnostics, but suppress the error logger that can include
+	# tunneled destinations. Access logging is intentionally not enabled.
+	log {
+		exclude http.log.error
+	}
+}
+
+:443, {$DOMAIN} {
+	tls {$ACME_EMAIL}
+	encode zstd gzip
+
+	forward_proxy {
+		basic_auth {$NAIVE_USER} {$NAIVE_PASSWORD}
+		hide_ip
+		hide_via
+		probe_resistance
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+
+	@site_metadata path /robots.txt /sitemap.xml
+	templates @site_metadata
+
+	root * /srv/www
+	file_server
+}

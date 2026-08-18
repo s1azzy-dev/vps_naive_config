@@ -1,0 +1,38 @@
+name: naive-gateway
+
+services:
+  caddy:
+    build:
+      context: .
+      args:
+        CADDY_VERSION: ${CADDY_VERSION:-2.11.4}
+        FORWARDPROXY_COMMIT: ${FORWARDPROXY_COMMIT:-d62c80d3dd2c706b6b87579844d2397bddd18317}
+    image: naive-gateway-caddy:${CADDY_VERSION:-2.11.4}
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN is required}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is required}
+      NAIVE_USER: ${NAIVE_USER:?NAIVE_USER is required}
+      NAIVE_PASSWORD: ${NAIVE_PASSWORD:?NAIVE_PASSWORD is required}
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./site:/srv/www:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --spider http://127.0.0.1:2019/config/ || exit 1"]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 40s
+    stop_grace_period: 20s
+
+volumes:
+  caddy_data:
+  caddy_config:
