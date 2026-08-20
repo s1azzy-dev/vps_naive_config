@@ -1,6 +1,10 @@
 {
 	order forward_proxy before file_server
 
+	servers :443 {
+		protocols h1 h2
+	}
+
 	# Keep runtime diagnostics, but suppress the error logger that can include
 	# tunneled destinations. Access logging is intentionally not enabled.
 	log {
