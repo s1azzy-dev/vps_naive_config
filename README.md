@@ -14,7 +14,7 @@
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git
+sudo apt-get install -y git make
 git clone https://github.com/s1azzy-dev/vps_naive_config.git
 cd vps_naive_config
 sudo DOMAIN=proxy.example.com ACME_EMAIL=admin@example.com ./install.sh
