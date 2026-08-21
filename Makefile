@@ -26,13 +26,19 @@ GATEWAY_REF := main
 endif
 
 COMPOSE := docker compose --env-file versions.env --env-file .env
+VENV_DIR ?= .venv
+ANSIBLE_CONFIG_FILE := $(CURDIR)/provisioning/ansible.cfg
+ANSIBLE_PLAYBOOK := $(CURDIR)/$(VENV_DIR)/bin/ansible-playbook
+ANSIBLE_LINT := $(CURDIR)/$(VENV_DIR)/bin/ansible-lint
 
-.PHONY: help init check-config install build up down restart logs status check update rotate-credentials backup validate test
+.PHONY: help init tooling tooling-check ansible-check check-config install build up down restart logs status check update rotate-credentials backup validate test
 
 help:
 	@printf '%s\n' \
 		'Controller configuration:' \
 		'  make init          Create .env from .env.example without overwriting it' \
+		'  make tooling       Install pinned Ansible tooling into .venv' \
+		'  make tooling-check Verify controller commands and pinned tool versions' \
 		'  make check-config  Validate local .env without connecting to a VPS' \
 		'' \
 		'Current server/runtime commands:' \
@@ -45,6 +51,7 @@ help:
 		'  make update        Run the transitional server-side update' \
 		'' \
 		'Project checks:' \
+		'  make ansible-check Run Ansible syntax, lint, and secret checks' \
 		'  make validate      Validate Compose and Caddy configuration' \
 		'  make test          Run the static test suite'
 
@@ -55,6 +62,20 @@ init:
 		install -m 600 .env.example "$(CONFIG_FILE)"; \
 		printf 'Created %s with mode 0600. Fill: VPS_HOST, SSH_PRIVATE_KEY, DOMAIN, ACME_EMAIL.\n' "$(CONFIG_FILE)"; \
 	fi
+
+tooling:
+	@VENV_DIR="$(VENV_DIR)" bash scripts/bootstrap-tooling.sh
+
+tooling-check:
+	@VENV_DIR="$(VENV_DIR)" bash scripts/check-tooling.sh
+
+ansible-check: tooling-check
+	@ANSIBLE_CONFIG="$(ANSIBLE_CONFIG_FILE)" ANSIBLE_HOME="$(CURDIR)/.ansible" ANSIBLE_LOCAL_TEMP="$(CURDIR)/.ansible/tmp" "$(ANSIBLE_PLAYBOOK)" --syntax-check provisioning/playbooks/preflight.yml
+	@ANSIBLE_CONFIG="$(ANSIBLE_CONFIG_FILE)" ANSIBLE_HOME="$(CURDIR)/.ansible" ANSIBLE_LOCAL_TEMP="$(CURDIR)/.ansible/tmp" "$(ANSIBLE_PLAYBOOK)" --syntax-check provisioning/playbooks/bootstrap.yml
+	@ANSIBLE_CONFIG="$(ANSIBLE_CONFIG_FILE)" ANSIBLE_HOME="$(CURDIR)/.ansible" ANSIBLE_LOCAL_TEMP="$(CURDIR)/.ansible/tmp" "$(ANSIBLE_PLAYBOOK)" --syntax-check provisioning/playbooks/deploy.yml
+	@ANSIBLE_CONFIG="$(ANSIBLE_CONFIG_FILE)" ANSIBLE_HOME="$(CURDIR)/.ansible" ANSIBLE_LOCAL_TEMP="$(CURDIR)/.ansible/tmp" "$(ANSIBLE_PLAYBOOK)" --syntax-check provisioning/playbooks/verify.yml
+	@PATH="$(CURDIR)/$(VENV_DIR)/bin:$$PATH" ANSIBLE_CONFIG="$(ANSIBLE_CONFIG_FILE)" ANSIBLE_HOME="$(CURDIR)/.ansible" ANSIBLE_LOCAL_TEMP="$(CURDIR)/.ansible/tmp" XDG_CACHE_HOME="$(CURDIR)/.ansible/cache" "$(ANSIBLE_LINT)" --offline
+	@bash scripts/check-ansible-secrets.sh provisioning
 
 check-config: export CONFIG_FILE := $(CONFIG_FILE)
 check-config: export VPS_HOST := $(VPS_HOST)

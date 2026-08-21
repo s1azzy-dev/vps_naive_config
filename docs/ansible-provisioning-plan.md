@@ -183,11 +183,12 @@ Makefile
 
 Пошагово:
 
-1. Проверяет наличие поддерживаемой версии `ansible-playbook`.
-2. Проверяет наличие `ssh`, `ssh-keygen`, `make` и Git.
-3. Устанавливает закреплённые Ansible collections из `provisioning/requirements.yml` в project-local path.
-4. Проверяет версии установленных collections.
-5. Не подключается к VPS.
+1. Проверяет наличие Python 3.12–3.14, `ssh`, `ssh-keygen`, `make` и Git.
+2. Создаёт или повторно использует project-local `.venv`.
+3. Устанавливает полностью закреплённые Python-зависимости из `provisioning/requirements-controller.txt`.
+4. Устанавливает только фактически используемые Ansible collections из `provisioning/requirements.yml` в project-local `.ansible/collections`.
+5. Проверяет точные версии `ansible-core`, ansible-lint и установленных collections.
+6. Не подключается к VPS.
 
 Успешный результат: controller готов выполнять playbooks воспроизводимой версией инструментов.
 
@@ -454,19 +455,30 @@ Gate 1:
 Работы:
 
 - добавить `ansible.cfg`, `requirements.yml`, playbooks и пустые роли;
-- закрепить совместимые версии `ansible-core`, `community.docker` и других реально используемых collections;
+- закрепить совместимые версии `ansible-core`, ansible-lint и реально используемых collections;
 - не добавлять collection без используемого модуля;
+- добавить `community.docker` с точной версией в фазе Docker одновременно с первым использующим её модулем;
 - реализовать `make tooling`;
 - добавить syntax-check, ansible-lint и secret scan;
 - исключить secret output через `no_log` и callback settings.
 
 Gate 2:
 
-- [ ] зависимости устанавливаются воспроизводимо;
-- [ ] `ansible-playbook --syntax-check` проходит;
-- [ ] ansible-lint проходит;
-- [ ] playbooks не содержат plaintext passwords/keys;
-- [ ] существующие application tests проходят.
+- [x] зависимости устанавливаются воспроизводимо;
+- [x] `ansible-playbook --syntax-check` проходит;
+- [x] ansible-lint проходит;
+- [x] playbooks не содержат plaintext passwords/keys;
+- [x] существующие application tests проходят.
+
+Результат Gate 2 (2026-08-22): **PASS**.
+
+- первый и повторный `make tooling`: PASS, project-local `.venv`, точные версии `ansible-core 2.21.2` и `ansible-lint 26.6.0`;
+- полный Python dependency lock: PASS, все controller-зависимости имеют точные версии;
+- syntax-check `preflight.yml`, `bootstrap.yml`, `deploy.yml`, `verify.yml`: PASS;
+- ansible-lint с обязательным профилем `production`: 0 failures, 0 warnings;
+- `scripts/check-ansible-secrets.sh provisioning`: PASS, regression fixture с plaintext password блокируется;
+- `make test`: PASS;
+- `git diff --check`: PASS.
 
 ### Этап 3. Реализовать read-only preflight
 

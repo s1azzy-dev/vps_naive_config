@@ -22,6 +22,9 @@ fi
 bash tests/check-config.sh
 pass "local config contract"
 
+bash tests/ansible-quality.sh
+pass "Ansible skeleton contract"
+
 [[ $(awk -F= '$1 == "FORWARDPROXY_COMMIT" {print length($2)}' versions.env) == 40 ]] || fail "forwardproxy pin is not a full SHA"
 grep -Fq 'CADDY_VERSION=2.11.4' versions.env || fail "reviewed Caddy pin missing"
 if grep -Eiq '(^|[^[:alpha:]])latest([^[:alpha:]]|$)' Dockerfile compose.yml versions.env; then
@@ -48,7 +51,7 @@ pass "believable same-origin static site"
 
 [[ -z $(git ls-files .env) ]] || fail ".env is tracked"
 grep -Fxq '.env' .gitignore || fail ".env is not ignored"
-if grep -ERn --exclude-dir=.git --exclude-dir=tests --exclude='*.md' \
+if grep -ERn --exclude-dir=.git --exclude-dir=.ansible --exclude-dir=.venv --exclude-dir=tests --exclude='*.md' \
   -E -e '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|https://[A-Za-z0-9._~-]{8,}:[A-Za-z0-9._~-]{32,}@' . >/dev/null; then
   fail "possible credential or private key committed"
 fi
