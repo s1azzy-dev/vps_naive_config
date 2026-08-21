@@ -1,0 +1,3 @@
+---
+# Collections are added only in the phase that introduces their first module.
+collections: []

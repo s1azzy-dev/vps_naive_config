@@ -1,0 +1,7 @@
+---
+- name: Deploy the Naive gateway
+  hosts: naive_gateway
+  gather_facts: false
+  roles:
+    - role: docker
+    - role: naive_gateway
