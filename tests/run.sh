@@ -19,6 +19,9 @@ else
   printf 'SKIP: shellcheck is not installed (CI requires it)\n'
 fi
 
+bash tests/check-config.sh
+pass "local config contract"
+
 [[ $(awk -F= '$1 == "FORWARDPROXY_COMMIT" {print length($2)}' versions.env) == 40 ]] || fail "forwardproxy pin is not a full SHA"
 grep -Fq 'CADDY_VERSION=2.11.4' versions.env || fail "reviewed Caddy pin missing"
 if grep -Eiq '(^|[^[:alpha:]])latest([^[:alpha:]]|$)' Dockerfile compose.yml versions.env; then
@@ -51,6 +54,7 @@ if grep -ERn --exclude-dir=.git --exclude-dir=tests --exclude='*.md' \
 fi
 grep -Fq 'exclude http.log.error' Caddyfile || fail "tunneled error logger is not suppressed"
 [[ $(grep -Ec '^[[:space:]]*log[[:space:]]*\{' Caddyfile) == 1 ]] || fail "unexpected access logging configuration"
+grep -Fq 'mime text/plain text/xml application/xml' Caddyfile || fail "site metadata template MIME types are incomplete"
 pass "secret and logging policy"
 
 fake_env=$(mktemp)

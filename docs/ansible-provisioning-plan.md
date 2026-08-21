@@ -404,10 +404,18 @@ Makefile
 
 Gate 0:
 
-- [ ] `make test` проходит;
-- [ ] local Caddy smoke проходит;
-- [ ] существующие пользовательские изменения сохранены;
-- [ ] план принят без открытых архитектурных вопросов.
+- [x] `make test` проходит;
+- [x] local Caddy smoke проходит;
+- [x] существующие пользовательские изменения сохранены;
+- [x] план принят без открытых архитектурных вопросов.
+
+Результат Gate 0 (2026-08-20): **PASS**.
+
+- baseline commit: `de6c37864601f128bb69b3c9bae113e5c6e7870d`;
+- branch: `codex/ansible-provisioning`;
+- static suite: PASS;
+- local Caddy/NaiveProxy runtime smoke: PASS;
+- baseline smoke исправлен так, чтобы readiness и proxy checks использовали SNI `smoke.localhost`, для которого выпускается локальный сертификат.
 
 ### Этап 1. Ввести локальный config contract
 
@@ -423,12 +431,23 @@ Gate 0:
 
 Gate 1:
 
-- [ ] `make help` работает без `.env`;
-- [ ] `make init` не перезаписывает существующий `.env`;
-- [ ] пустой обязательный параметр даёт точную ошибку;
-- [ ] секреты не печатаются;
-- [ ] корректный `.env` заканчивается `Configuration: OK`;
-- [ ] VPS не затрагивается.
+- [x] `make help` работает без `.env`;
+- [x] `make init` не перезаписывает существующий `.env`;
+- [x] пустой обязательный параметр даёт точную ошибку;
+- [x] секреты не печатаются;
+- [x] корректный `.env` заканчивается `Configuration: OK`;
+- [x] VPS не затрагивается.
+
+Результат Gate 1 (2026-08-22): **PASS**.
+
+- добавлен tracked-шаблон `.env.example` и project-local artifact ignores;
+- `make init` создаёт config с правами `0600` и не перезаписывает его;
+- `make check-config` проверяет обязательные значения, форматы, SSH key paths, repository/ref и согласованность optional credentials;
+- controller variables экспортируются только в `check-config` и не перекрывают Compose `--env-file`;
+- config contract tests покрывают missing, partial, malformed и insecure-mode inputs;
+- `make test`: PASS;
+- local Caddy/NaiveProxy runtime smoke: PASS;
+- runtime smoke стабилизирован для корректного SNI и `pipefail`, а Caddy templates явно включены для фактического MIME `text/xml` metadata-файла.
 
 ### Этап 2. Создать Ansible skeleton и quality gate
 

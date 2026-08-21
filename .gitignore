@@ -1,7 +1,8 @@
 .env
+.ansible/
+provisioning/known_hosts
 backups/*
 !backups/.gitkeep
 *.tmp
 *.bak
 .DS_Store
-
