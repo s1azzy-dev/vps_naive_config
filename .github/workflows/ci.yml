@@ -95,8 +95,6 @@ jobs:
     name: Runtime smoke / Caddy
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    env:
-      CI_ENV_FILE: ${{ runner.temp }}/naive-gateway-ci.env
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -104,6 +102,8 @@ jobs:
           persist-credentials: false
 
       - name: Create isolated fake runtime environment
+        env:
+          CI_ENV_FILE: ${{ runner.temp }}/naive-gateway-ci.env
         run: |
           install -m 600 /dev/null "$CI_ENV_FILE"
           printf '%s\n' \
@@ -112,6 +112,7 @@ jobs:
             'NAIVE_USER=0011223344556677' \
             'NAIVE_PASSWORD=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff' \
             > "$CI_ENV_FILE"
+          printf 'CI_ENV_FILE=%s\n' "$CI_ENV_FILE" >> "$GITHUB_ENV"
 
       - name: Build pinned custom Caddy
         run: >-
