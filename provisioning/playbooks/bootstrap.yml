@@ -1,0 +1,9 @@
+---
+- name: Bootstrap the gateway host
+  hosts: naive_gateway
+  gather_facts: false
+  roles:
+    - role: bootstrap
+    - role: user
+    - role: ssh
+    - role: firewall

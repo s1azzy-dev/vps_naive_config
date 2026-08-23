@@ -31,7 +31,9 @@
 	}
 
 	@site_metadata path /robots.txt /sitemap.xml
-	templates @site_metadata
+	templates @site_metadata {
+		mime text/plain text/xml application/xml
+	}
 
 	root * /srv/www
 	file_server

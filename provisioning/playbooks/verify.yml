@@ -1,0 +1,8 @@
+---
+- name: Verify the Naive gateway
+  hosts: naive_gateway
+  gather_facts: false
+  tasks:
+    - name: Stop until remote verification is implemented
+      ansible.builtin.fail:
+        msg: Remote verification is not implemented yet.

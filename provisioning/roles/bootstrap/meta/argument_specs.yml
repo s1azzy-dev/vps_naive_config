@@ -1,0 +1,5 @@
+---
+argument_specs:
+  main:
+    short_description: Validate inputs for the bootstrap role
+    options: {}

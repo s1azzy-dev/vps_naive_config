@@ -9,6 +9,8 @@ USER_VALUE=0011223344556677
 PASSWORD_VALUE=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
 SMOKE_CADDYFILE=$(mktemp)
 TMP_DIR=$(mktemp -d)
+SMOKE_HOST=smoke.localhost
+resolve_smoke=(--resolve "${SMOKE_HOST}:${PORT}:127.0.0.1")
 
 cleanup() {
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -23,7 +25,7 @@ sed "s/tls {\$ACME_EMAIL}/tls internal/" "$ROOT_DIR/Caddyfile" > "$SMOKE_CADDYFI
 
 docker run -d --name "$CONTAINER" \
   -p "127.0.0.1:${PORT}:443/tcp" \
-  -e DOMAIN=smoke.localhost \
+  -e DOMAIN="$SMOKE_HOST" \
   -e ACME_EMAIL=ci@example.com \
   -e NAIVE_USER="$USER_VALUE" \
   -e NAIVE_PASSWORD="$PASSWORD_VALUE" \
@@ -33,7 +35,8 @@ docker run -d --name "$CONTAINER" \
 
 ready=0
 for _ in {1..20}; do
-  if curl -kfsS --max-time 3 "https://localhost:${PORT}/" >/dev/null 2>&1; then
+  if curl -kfsS --max-time 3 "${resolve_smoke[@]}" \
+    "https://${SMOKE_HOST}:${PORT}/" >/dev/null 2>&1; then
     ready=1
     break
   fi
@@ -45,16 +48,30 @@ for _ in {1..20}; do
 done
 [[ $ready == 1 ]] || { docker logs "$CONTAINER" >&2 || true; printf 'smoke server did not start\n' >&2; exit 1; }
 
-curl -kfsS "https://localhost:${PORT}/" | grep -Fq 'Northline Notes'
-curl -kfsS "https://localhost:${PORT}/sitemap.xml" | grep -Fq 'https://smoke.localhost/'
+curl -kfsS "${resolve_smoke[@]}" "https://${SMOKE_HOST}:${PORT}/" -o "$TMP_DIR/site.html"
+grep -Fq 'Northline Notes' "$TMP_DIR/site.html"
+curl -kfsS "${resolve_smoke[@]}" "https://${SMOKE_HOST}:${PORT}/sitemap.xml" \
+  -D "$TMP_DIR/sitemap.headers" -o "$TMP_DIR/sitemap.xml"
+if ! grep -Fq 'https://smoke.localhost/' "$TMP_DIR/sitemap.xml"; then
+  printf 'rendered sitemap does not contain the smoke hostname:\n' >&2
+  sed -n '1,20p' "$TMP_DIR/sitemap.headers" >&2
+  sed -n '1,20p' "$TMP_DIR/sitemap.xml" >&2
+  exit 1
+fi
+curl -kfsS "${resolve_smoke[@]}" "https://${SMOKE_HOST}:${PORT}/robots.txt" -o "$TMP_DIR/robots.txt"
+grep -Fq 'https://smoke.localhost/sitemap.xml' "$TMP_DIR/robots.txt"
 docker exec "$CONTAINER" wget -qO- http://127.0.0.1:2019/config/ >/dev/null
 
-openssl s_client -connect "localhost:${PORT}" -servername smoke.localhost -alpn h2 </dev/null \
+openssl s_client -connect "localhost:${PORT}" -servername "$SMOKE_HOST" -alpn h2 </dev/null \
   >"$TMP_DIR/tls.txt" 2>&1
 grep -Fq 'ALPN protocol: h2' "$TMP_DIR/tls.txt"
 
+: >"$TMP_DIR/probe.headers"
+: >"$TMP_DIR/probe.body"
+: >"$TMP_DIR/probe.error"
 set +e
-curl -ksS --proxy-insecure --max-time 15 --proxy "https://localhost:${PORT}" \
+curl -ksS --proxy-insecure --max-time 15 "${resolve_smoke[@]}" \
+  --proxy "https://${SMOKE_HOST}:${PORT}" \
   https://example.com/ -D "$TMP_DIR/probe.headers" -o "$TMP_DIR/probe.body" \
   2>"$TMP_DIR/probe.error"
 set -e
@@ -64,10 +81,12 @@ if grep -Eiq '(^|[[:space:]])407([[:space:]]|$)|Proxy-Authenticate|forward proxy
   exit 1
 fi
 
-curl -kfsS --proxy-insecure --max-time 20 --proxy "https://localhost:${PORT}" \
+curl -kfsS --proxy-insecure --max-time 20 "${resolve_smoke[@]}" \
+  --proxy "https://${SMOKE_HOST}:${PORT}" \
   --proxy-user "${USER_VALUE}:${PASSWORD_VALUE}" https://example.com/ -o /dev/null
 
-if docker logs "$CONTAINER" 2>&1 | grep -Fq 'example.com'; then
+docker logs "$CONTAINER" >"$TMP_DIR/container.log" 2>&1
+if grep -Fq 'example.com' "$TMP_DIR/container.log"; then
   printf 'tunneled destination appeared in Caddy logs\n' >&2
   exit 1
 fi
