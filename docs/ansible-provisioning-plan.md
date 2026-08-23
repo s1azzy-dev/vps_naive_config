@@ -24,7 +24,7 @@
 - `.env` с параметрами VPS и deployment;
 - приватный SSH-ключ пользователя;
 - Ansible и закреплённые версии необходимых collections;
-- SSH host key VPS в стандартном `known_hosts`.
+- SSH host key VPS в project-local `provisioning/known_hosts` с правами `0600`.
 
 Локальный `.env` никогда не копируется на VPS целиком.
 
@@ -101,7 +101,7 @@ NAIVE_PASSWORD=
 - `NAIVE_USER` и `NAIVE_PASSWORD` либо оба пусты, либо оба заполнены;
 - если Naive credentials пусты и серверного runtime-файла ещё нет, они генерируются один раз;
 - sudo/root passwords в `.env` не хранятся;
-- `.env` загружается Make только по явному whitelist переменных;
+- `.env` читает типизированный controller; Make не импортирует и не экспортирует его значения;
 - отсутствие `.env` не должно ломать `make help` и `make init`.
 
 ### 3.2. Серверный `gateway.env`
@@ -130,11 +130,21 @@ NAIVE_PASSWORD=generated-or-explicit-password
 ## 4. Целевая структура проекта
 
 ```text
+pyproject.toml
+uv.lock
+
+src/naive_gateway_controller/
+  cli.py
+  config.py
+  network.py
+  ssh.py
+  preflight.py
+  tooling.py
+
 provisioning/
   ansible.cfg
   requirements.yml
   playbooks/
-    preflight.yml
     bootstrap.yml
     deploy.yml
     verify.yml
@@ -145,6 +155,7 @@ provisioning/
     firewall/
     docker/
     naive_gateway/
+      meta/argument_specs.yml
   templates/
     ssh-hardening.conf.j2
     gateway.env.j2
@@ -154,11 +165,44 @@ scripts/
   backup.sh
   rotate-credentials.sh
 
+tests/
+  test_config.py
+  test_network.py
+  test_ssh.py
+  test_preflight.py
+  test_repository.py
+
 .env.example
 Makefile
 ```
 
-Допускается небольшой controller-side wrapper для выбора bootstrap/deploy path. Он не должен содержать provisioning-логику: вся изменяющая VPS логика находится в Ansible.
+Controller реализуется как типизированный Python package с CLI. Он отвечает только за локальную конфигурацию, read-only probes, выбор bootstrap/deploy path и запуск Ansible. Вся изменяющая VPS логика находится в Ansible.
+
+### 4.1. Инструменты качества и тестовая пирамида
+
+Быстрый локальный gate, запускаемый до обращения к VPS:
+
+1. Ruff проверяет стиль, ошибки и формат Python-кода.
+2. mypy в strict-режиме проверяет типы controller package.
+3. pytest проверяет config, DNS, SSH state machine, CLI и repository contracts без сети.
+4. `ansible-playbook --syntax-check` и ansible-lint с профилем `production` проверяют playbooks и roles.
+5. `meta/argument_specs.yml` задаёт типизированный публичный контракт каждой роли и валидируется Ansible/ansible-lint.
+6. Закреплённые зависимости устанавливаются через `uv sync --frozen` из `pyproject.toml` и `uv.lock`.
+
+Интеграционный gate для каждой реальной Ansible role:
+
+1. Molecule создаёт изолированный test instance, выполняет `converge`, второй idempotence run и `verify`.
+2. pytest-testinfra проверяет итоговое состояние packages, users, files, services и commands.
+3. Molecule и pytest-testinfra добавляются одновременно с первой ролью, которая их использует; в пустой skeleton они не устанавливаются.
+
+Полный destructive E2E gate:
+
+1. Выполняется только на disposable VM/VPS, никогда на production host.
+2. Проверяет настоящий systemd, sshd, UFW, Docker, reconnect и lockout-negative scenarios.
+3. Container-based Molecule не считается достаточным доказательством для SSH/UFW/systemd boundary.
+4. `ansible-test` не используется, пока проект не оформлен как Ansible collection; при таком переходе решение пересматривается.
+
+Make остаётся стабильным пользовательским facade: команды принимают только путь к `.env`, а значения конфигурации через CLI не передаются.
 
 ## 5. Контракт пользовательских команд
 
@@ -185,10 +229,11 @@ Makefile
 
 1. Проверяет наличие Python 3.12–3.14, `ssh`, `ssh-keygen`, `make` и Git.
 2. Создаёт или повторно использует project-local `.venv`.
-3. Устанавливает полностью закреплённые Python-зависимости из `provisioning/requirements-controller.txt`.
-4. Устанавливает только фактически используемые Ansible collections из `provisioning/requirements.yml` в project-local `.ansible/collections`.
-5. Проверяет точные версии `ansible-core`, ansible-lint и установленных collections.
-6. Не подключается к VPS.
+3. Устанавливает точную версию uv в project-local `.venv`.
+4. Выполняет `uv sync --frozen` по `pyproject.toml` и `uv.lock`.
+5. Устанавливает только фактически используемые Ansible collections из `provisioning/requirements.yml` в project-local `.ansible/collections`.
+6. Проверяет точные версии uv, `ansible-core`, ansible-lint и установленных collections.
+7. Не подключается к VPS.
 
 Успешный результат: controller готов выполнять playbooks воспроизводимой версией инструментов.
 
@@ -199,8 +244,8 @@ Makefile
 Пошагово:
 
 1. Проверяет существование `.env`.
-2. Проверяет заполненность обязательных переменных.
-3. Подставляет документированные defaults для необязательных переменных.
+2. Типизированная Pydantic Settings model читает файл напрямую, не экспортируя значения через Make или process environment.
+3. Проверяет заполненность обязательных переменных и подставляет документированные defaults.
 4. Проверяет формат `VPS_HOST`, `VPS_PORT`, `DOMAIN`, `ACME_EMAIL`.
 5. Проверяет абсолютный путь и существование приватного SSH-ключа.
 6. Определяет и проверяет публичный SSH-ключ.
@@ -219,12 +264,12 @@ Makefile
 Пошагово:
 
 1. Выполняет `make check-config`.
-2. Проверяет наличие и версии Ansible dependencies.
+2. Проверяет наличие и версии controller/Ansible dependencies.
 3. Разрешает `VPS_HOST` в IP, если задан hostname.
 4. Получает `A`-записи `DOMAIN` и проверяет соответствие адресу VPS.
 5. Проверяет `AAAA`: неверная или недоступная IPv6-запись считается блокирующей ошибкой перед deploy.
 6. Проверяет доступность SSH-порта.
-7. При первом подключении принимает новый host key через `accept-new` и сохраняет его в `known_hosts`.
+7. При первом подключении принимает новый host key через `accept-new` и сохраняет его в игнорируемый Git файл `provisioning/known_hosts` с правами `0600`.
 8. Изменившийся известный host key считается ошибкой и никогда не принимается автоматически.
 9. Проверяет вход под `VPS_USER` по ключу.
 10. Если `VPS_USER` ещё недоступен, проверяет bootstrap-вход под `VPS_BOOTSTRAP_USER`.
@@ -391,6 +436,29 @@ Makefile
 
 Серверный `make update` после перехода удаляется. Обновление выполняется с controller через `make deploy`.
 
+### 5.11. Локальные команды качества
+
+`make lint` выполняет по шагам:
+
+1. Проверяет frozen toolchain и поддержку `accept-new` в OpenSSH.
+2. Выполняет syntax-check каждого существующего Ansible playbook.
+3. Запускает ansible-lint с обязательным профилем `production`.
+4. Запускает Ruff rules и отдельную проверку форматирования.
+5. Запускает mypy для controller package в strict-режиме.
+6. Проверяет синтаксис оставшихся shell adapters и запускает shellcheck, если он установлен.
+7. Не читает `.env`, не подключается к VPS и ничего не изменяет на VPS.
+
+`make test` выполняет по шагам:
+
+1. Проверяет frozen toolchain.
+2. Запускает pytest для config, CLI, DNS, SSH, preflight и repository contracts.
+3. Проверяет, что Make передаёт controller только путь к `.env`, а не значения полей.
+4. Проверяет secret/logging policies и regression fixture с plaintext Ansible password.
+5. Проверяет role argument specs, version pins, static site и Docker Compose config.
+6. Не выполняет сетевые DNS/SSH probes и не изменяет VPS.
+
+`make ansible-check` — быстрый Ansible-only subset `make lint`: tooling-check, syntax-check и ansible-lint production.
+
 ## 6. Последовательный план реализации
 
 ### Этап 0. Зафиксировать baseline
@@ -425,7 +493,7 @@ Gate 0:
 - добавить `.env.example`;
 - расширить `.gitignore` для controller/runtime artifacts;
 - реализовать `make init`;
-- реализовать whitelist загрузки `.env`;
+- реализовать безопасный contract загрузки `.env`; окончательное чтение без импорта в Make выполняется в этапе 3.5;
 - реализовать `make check-config`;
 - обновить `make help`;
 - добавить тесты пустых, частичных и некорректных значений.
@@ -492,12 +560,117 @@ Gate 2:
 
 Gate 3:
 
-- [ ] корректный новый VPS определяется как `bootstrap required`;
-- [ ] подготовленный VPS определяется как `managed host ready`;
-- [ ] неверный DNS блокирует deploy;
-- [ ] изменившийся host key блокирует подключение;
-- [ ] недоступный VPS завершается понятной ошибкой;
-- [ ] preflight не изменяет локальную или удалённую систему, кроме записи нового host key.
+- [x] корректный новый VPS определяется как `bootstrap required`;
+- [x] подготовленный VPS определяется как `managed host ready`;
+- [x] неверный DNS блокирует deploy;
+- [x] изменившийся host key блокирует подключение;
+- [x] недоступный VPS завершается понятной ошибкой;
+- [x] preflight не изменяет локальную или удалённую систему, кроме записи нового host key.
+
+Результат Gate 3 (2026-08-23): **PASS**.
+
+- `make preflight` end-to-end contract: PASS, значения прочитаны из controller `.env`, `check-config` выполнен автоматически;
+- managed-user SSH доступен: выбран `managed host ready`, bootstrap login не выполняется;
+- managed-user недоступен, bootstrap-user доступен: выбран `bootstrap required`;
+- неверные `A`, неверные `AAAA` и недоступный IPv6: каждый сценарий блокируется до SSH login;
+- недоступный SSH port и отказ ключа для обоих пользователей: блокируются с отдельными понятными ошибками;
+- существующий изменившийся host key: блокируется, bootstrap fallback не выполняется;
+- новый host key записывается только в `provisioning/known_hosts` с правами `0600`;
+- SSH probe выполняет на VPS только read-only команду `true`; сценарный тест блокирует любую другую remote command;
+- `make ansible-check`: PASS, включая 4 syntax-check, production ansible-lint, secret scan, DNS unit tests и SSH/DNS scenario tests;
+- `make test`: PASS;
+- `git diff --check`: PASS.
+
+Live VPS smoke не выполнялся: локальный `.env` отсутствует. Gate подтверждён детерминированными сценарными тестами без внешних изменений.
+
+### Этап 3.5. Стандартизировать controller и testing stack
+
+Работы:
+
+- перенести локальную config/preflight orchestration из shell в типизированный Python package;
+- читать `.env` через Pydantic Settings без импорта значений в Make;
+- сохранить пользовательские команды `make tooling`, `make check-config` и `make preflight`;
+- заменить hand-written scenario runner на pytest с unit/contract tests;
+- добавить Ruff и mypy strict;
+- заменить `requirements-controller.txt` на `pyproject.toml` и воспроизводимый `uv.lock`;
+- добавить `meta/argument_specs.yml` для каждой Ansible role;
+- оставить shell только для тонких OS/runtime adapters, для которых shell является естественным интерфейсом;
+- удалить controller shell scripts и fixtures после функционального parity;
+- зафиксировать Molecule + pytest-testinfra как обязательный TDD gate первой реальной role в этапе 4;
+- зафиксировать disposable VM/VPS E2E как обязательный gate для sshd/UFW/systemd/Docker.
+
+Gate 3.5:
+
+- [x] `make tooling` воспроизводимо выполняет frozen sync по `uv.lock`;
+- [x] `make check-config` читает `.env` через типизированную model и не печатает secrets;
+- [x] `make preflight` использует типизированные DNS/SSH components и сохраняет read-only contract;
+- [x] pytest покрывает позитивные и негативные config/DNS/SSH/preflight scenarios;
+- [x] Ruff, format check и mypy strict проходят;
+- [x] Ansible syntax-check и ansible-lint production проходят;
+- [x] role argument specs проходят schema validation;
+- [x] заменённые shell scripts, hand-written fakes и scenario runner удалены;
+- [x] существующие application tests проходят;
+- [x] `git diff --check` проходит.
+
+Результат Gate 3.5 (2026-08-23): **PASS**.
+
+- `make tooling`: PASS на чистой временной virtualenv и при повторном frozen sync; 47 locked packages;
+- controller package: Pydantic Settings, typed DNS/TCP report, typed SSH outcomes и явная preflight state machine;
+- Make не импортирует `.env` и передаёт controller только путь через `CONFIG_FILE`;
+- Ruff rules/format: PASS; mypy strict: 9 source files, 0 errors;
+- pytest: 43 tests, включая Make UX, secret-safe config, DNS/AAAA, host-key change, SSH fallback и repository policies;
+- Ansible syntax-check: `bootstrap.yml`, `deploy.yml`, `verify.yml` — PASS;
+- ansible-lint `production`: 0 failures, 0 warnings; role argument specs провалидированы;
+- заменённые controller shell scripts, fixtures, custom runner, Ansible preflight playbook и pip requirements lock удалены;
+- Docker Compose config contract: PASS внутри pytest;
+- `git diff --check`: PASS.
+
+Live DNS/SSH preflight не выполнялся: локальный `.env` отсутствует. Read-only contract подтверждён изолированными typed tests; реальный host остаётся gate перед bootstrap.
+
+### Этап 3.6. Настроить полный CI quality pipeline
+
+Работы:
+
+- заменить устаревший single-job workflow на отдельные quality, Python tests и runtime smoke jobs;
+- запускать CI на `push`, `pull_request` и вручную через `workflow_dispatch`;
+- ограничить `GITHUB_TOKEN` правами `contents: read`;
+- отменять устаревший запуск для той же ветки или pull request через concurrency group;
+- закрепить все сторонние Actions полными commit SHA с комментариями release versions;
+- использовать Ubuntu 24.04 и явно заданные Python versions;
+- в quality job устанавливать обязательный shellcheck и выполнять `make tooling`, затем `make lint`;
+- в test matrix выполнять `make tooling` и `make test` на Python 3.12, 3.13 и 3.14;
+- кэшировать project-local uv cache по `uv.lock`, не кэшировать `.venv`;
+- в отдельном runtime job собирать pinned Caddy image, выполнять Caddy validate, проверять наличие `forward_proxy` module и запускать `tests/smoke-local.sh`;
+- использовать только фиктивные CI credentials и не обращаться к реальному VPS, DNS или SSH;
+- добавить pytest contract для структуры и обязательных команд workflow.
+
+Gate 3.6:
+
+- [x] workflow имеет минимальные permissions, concurrency cancellation и bounded timeouts;
+- [x] сторонние Actions закреплены полными SHA;
+- [x] quality job выполняет весь `make lint` и требует shellcheck;
+- [x] pytest проходит на Python 3.12, 3.13 и 3.14;
+- [x] Docker Compose config, Caddy validate/module check и runtime smoke выполняются отдельно;
+- [x] workflow не читает production `.env`, не использует repository secrets и не подключается к VPS;
+- [x] локальные `make lint`, `make test` и workflow contract tests проходят;
+- [x] `git diff --check` проходит.
+
+Результат Gate 3.6 (2026-08-23): **PASS**.
+
+- workflow: 3 независимых jobs и 5 job instances — quality, pytest для Python 3.12/3.13/3.14 и runtime smoke;
+- triggers: `push`, `pull_request`, `workflow_dispatch`; permissions: только `contents: read`;
+- concurrency cancellation и timeouts: PASS по pytest workflow contract;
+- `actions/checkout`, `actions/setup-python` и `astral-sh/setup-uv` закреплены полными commit SHA;
+- quality: Ruff, format check, mypy strict, Ansible syntax-check, ansible-lint production и обязательный ShellCheck — PASS;
+- pytest: 44 теста отдельно прошли на Python 3.12.13, 3.13.14 и 3.14.6;
+- Docker: Compose build, Caddy validate и наличие `http.handlers.forward_proxy` — PASS;
+- runtime: локальный TLS/HTTP2, authentication boundary и authenticated proxy request — PASS;
+- workflow использует только временный файл с фиктивными credentials и не запускает preflight или SSH к VPS;
+- `git diff --check`: PASS.
+
+Удалённый GitHub Actions run ещё не выполнялся: workflow начнёт работать после commit и push ветки.
+
+Этап 4 запрещено начинать до PASS Gate 3.6.
 
 ### Этап 4. Реализовать user и SSH bootstrap
 
@@ -510,6 +683,8 @@ Gate 3:
 - применение SSH drop-in через validate-before-reload handler;
 - отрицательные root/password login tests;
 - повторный запуск без изменения пароля.
+- до реализации tasks добавить Molecule scenario и pytest-testinfra assertions для user/SSH role contracts;
+- container-capable assertions выполнять в Molecule, а настоящий reconnect/lockout сценарий — на disposable VM/VPS.
 
 Gate 4:
 
@@ -520,6 +695,8 @@ Gate 4:
 - [ ] `sshd -t` проходит;
 - [ ] повторный bootstrap не меняет пароль и authorized key;
 - [ ] искусственно ошибочный SSH template не применяется и не вызывает lockout.
+- [ ] Molecule converge/idempotence/verify и pytest-testinfra проходят;
+- [ ] disposable VM/VPS reconnect и lockout-negative E2E проходят.
 
 ### Этап 5. Реализовать host firewall
 
@@ -532,6 +709,7 @@ Gate 4:
 - включить UFW;
 - проверить SSH после включения;
 - документировать Docker/UFW boundary и обязательность provider firewall.
+- выполнить destructive firewall проверки на disposable VM/VPS.
 
 Gate 5:
 
@@ -540,6 +718,7 @@ Gate 5:
 - [ ] `443/udp` закрыт;
 - [ ] повторный запуск не создаёт дубликаты правил;
 - [ ] внешний port scan после deploy не показывает неожиданных портов.
+- [ ] disposable VM/VPS подтверждает доступность SSH после фактического включения UFW.
 
 ### Этап 6. Перенести установку Docker в Ansible
 
@@ -553,6 +732,7 @@ Gate 5:
 - включить service;
 - проверить версии;
 - убрать Docker installation из `install.sh` на переходном этапе.
+- добавить Molecule/pytest-testinfra проверки поддерживаемой части роли и disposable VM/VPS systemd E2E.
 
 Gate 6:
 
@@ -562,6 +742,7 @@ Gate 6:
 - [ ] пользователь не входит в `docker` group;
 - [ ] повторный запуск не переустанавливает Docker без причины;
 - [ ] неизвестная существующая Docker installation не удаляется автоматически.
+- [ ] Molecule idempotence и disposable VM/VPS Docker service E2E проходят.
 
 ### Этап 7. Перенести Naive Gateway deployment в Ansible
 

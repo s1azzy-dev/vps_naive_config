@@ -1,6 +1,11 @@
 .env
 .ansible/
 .venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
 provisioning/known_hosts
 backups/*
 !backups/.gitkeep

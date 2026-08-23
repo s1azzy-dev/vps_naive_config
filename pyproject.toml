@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "naive-gateway-controller"
+version = "0.1.0"
+description = "Typed local controller for Naive Gateway provisioning"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+  "dnspython==2.8.0",
+  "pydantic-settings==2.15.0",
+]
+
+[project.scripts]
+gateway-controller = "naive_gateway_controller.cli:main"
+
+[dependency-groups]
+dev = [
+  "ansible-core==2.21.2",
+  "ansible-lint==26.6.0",
+  "mypy==2.3.0",
+  "pytest==9.1.1",
+  "ruff==0.16.2",
+  "uv==0.12.5",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/naive_gateway_controller"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "PT", "PTH", "RUF", "S", "SIM", "UP"]
+ignore = [
+  "COM812",
+  "D203",
+  "D213",
+  "E501",
+  "S603",
+  "S607",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S105"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true

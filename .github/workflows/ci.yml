@@ -3,40 +3,130 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_COLOR: "1"
+  UV_CACHE_DIR: ${{ github.workspace }}/.ansible/uv-cache
+
 jobs:
-  verify:
+  quality:
+    name: Quality / Python 3.12
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - name: Install static-check dependencies
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - name: Create fake environment
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up pinned uv and cache
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.5"
+          enable-cache: true
+          cache-local-path: .ansible/uv-cache
+          cache-dependency-glob: uv.lock
+          cache-suffix: python-3.12
+
+      - name: Install required system linters
         run: |
-          umask 077
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends shellcheck
+
+      - name: Install frozen controller toolchain
+        run: make tooling
+
+      - name: Run all linters
+        env:
+          REQUIRE_SHELLCHECK: "1"
+        run: make lint
+
+  tests:
+    name: Tests / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.12"
+          - "3.13"
+          - "3.14"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up pinned uv and cache
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.5"
+          enable-cache: true
+          cache-local-path: .ansible/uv-cache
+          cache-dependency-glob: uv.lock
+          cache-suffix: python-${{ matrix.python-version }}
+
+      - name: Install frozen controller toolchain
+        run: make tooling
+
+      - name: Run pytest suite
+        run: make test
+
+  runtime-smoke:
+    name: Runtime smoke / Caddy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CI_ENV_FILE: ${{ runner.temp }}/naive-gateway-ci.env
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create isolated fake runtime environment
+        run: |
+          install -m 600 /dev/null "$CI_ENV_FILE"
           printf '%s\n' \
             'DOMAIN=ci.example' \
             'ACME_EMAIL=ci@example.com' \
             'NAIVE_USER=0011223344556677' \
             'NAIVE_PASSWORD=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff' \
-            > /tmp/naive-gateway-ci.env
-      - name: Static tests
-        env:
-          REQUIRE_SHELLCHECK: "1"
-        run: ./tests/run.sh
+            > "$CI_ENV_FILE"
+
       - name: Build pinned custom Caddy
-        run: docker compose --env-file versions.env --env-file /tmp/naive-gateway-ci.env -f compose.yml build
-      - name: Validate exact Caddy configuration
+        run: >-
+          docker compose --env-file versions.env --env-file "$CI_ENV_FILE"
+          -f compose.yml build
+
+      - name: Validate Caddy configuration and module
         run: |
-          docker compose --env-file versions.env --env-file /tmp/naive-gateway-ci.env -f compose.yml \
+          docker compose --env-file versions.env --env-file "$CI_ENV_FILE" -f compose.yml \
             run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-          docker compose --env-file versions.env --env-file /tmp/naive-gateway-ci.env -f compose.yml \
+          docker compose --env-file versions.env --env-file "$CI_ENV_FILE" -f compose.yml \
             run --rm --no-deps caddy caddy list-modules | grep -Fx http.handlers.forward_proxy
-      - name: Runtime smoke test
+
+      - name: Run local runtime smoke
         run: ./tests/smoke-local.sh
-      - name: Confirm no tracked secret file
+
+      - name: Confirm no tracked runtime environment
         run: test -z "$(git ls-files .env)"

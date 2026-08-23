@@ -1,9 +1,0 @@
----
-- name: Check controller and gateway readiness
-  hosts: localhost
-  connection: local
-  gather_facts: false
-  tasks:
-    - name: Stop until read-only preflight is implemented in phase 3
-      ansible.builtin.fail:
-        msg: Preflight is not implemented yet.
