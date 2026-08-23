@@ -193,7 +193,16 @@ def test_ci_workflow_covers_every_quality_layer() -> None:
     assert "make tooling" in test_commands
     assert "make test" in test_commands
 
-    runtime_commands = "\n".join(step.get("run", "") for step in jobs["runtime-smoke"]["steps"])
+    runtime_job = jobs["runtime-smoke"]
+    assert "CI_ENV_FILE" not in runtime_job.get("env", {})
+    runtime_steps = runtime_job["steps"]
+    create_env_step = next(
+        step for step in runtime_steps if step["name"] == "Create isolated fake runtime environment"
+    )
+    assert create_env_step["env"]["CI_ENV_FILE"] == "${{ runner.temp }}/naive-gateway-ci.env"
+    assert '>> "$GITHUB_ENV"' in create_env_step["run"]
+
+    runtime_commands = "\n".join(step.get("run", "") for step in runtime_steps)
     for expected in ("compose.yml build", "caddy validate", "caddy list-modules", "smoke-local.sh"):
         assert expected in runtime_commands
 
