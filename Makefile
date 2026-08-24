@@ -18,10 +18,11 @@ UV := $(VENV_BIN)/uv
 ANSIBLE_CONFIG_FILE := $(CURDIR)/provisioning/ansible.cfg
 ANSIBLE_PLAYBOOK := $(VENV_BIN)/ansible-playbook
 ANSIBLE_LINT := $(VENV_BIN)/ansible-lint
+MOLECULE := $(VENV_BIN)/molecule
 ANSIBLE_ENV := ANSIBLE_CONFIG="$(ANSIBLE_CONFIG_FILE)" ANSIBLE_HOME="$(CURDIR)/.ansible" ANSIBLE_LOCAL_TEMP="$(CURDIR)/.ansible/tmp"
 SHELL_FILES := install.sh $(wildcard scripts/*.sh) tests/smoke-local.sh
 
-.PHONY: help init tooling tooling-check lint ansible-check check-config preflight install build up down restart logs status check update rotate-credentials backup validate test
+.PHONY: help init tooling tooling-check lint ansible-check molecule check-config preflight bootstrap install build up down restart logs status check update rotate-credentials backup validate test
 
 help:
 	@printf '%s\n' \
@@ -31,6 +32,7 @@ help:
 		'  make tooling-check Verify controller commands and pinned tool versions' \
 		'  make check-config  Validate local .env without connecting to a VPS' \
 		'  make preflight     Read-only DNS, TCP, host-key, and SSH readiness checks' \
+		'  make bootstrap     Create the user, harden SSH, and configure UFW' \
 		'' \
 		'Current server/runtime commands:' \
 		'  make install       Run the transitional shell installer' \
@@ -44,6 +46,7 @@ help:
 		'Project checks:' \
 		'  make lint          Run Ruff, mypy, shell, and Ansible static checks' \
 		'  make ansible-check Run Ansible syntax and production lint checks' \
+		'  make molecule      Run isolated bootstrap/SSH/UFW/Docker role tests' \
 		'  make validate      Validate Compose and Caddy configuration' \
 		'  make test          Run the pytest suite'
 
@@ -80,6 +83,9 @@ ansible-check: tooling-check
 	@$(ANSIBLE_ENV) "$(ANSIBLE_PLAYBOOK)" --syntax-check provisioning/playbooks/verify.yml
 	@PATH="$(VENV_BIN):$$PATH" $(ANSIBLE_ENV) XDG_CACHE_HOME="$(CURDIR)/.ansible/cache" "$(ANSIBLE_LINT)" --offline
 
+molecule: tooling-check
+	@cd provisioning && PATH="$(VENV_BIN):$$PATH" $(ANSIBLE_ENV) "$(MOLECULE)" test --scenario-name default
+
 lint: ansible-check
 	@"$(VENV_BIN)/ruff" check .
 	@"$(VENV_BIN)/ruff" format --check .
@@ -98,6 +104,9 @@ check-config: tooling-check
 
 preflight: tooling-check
 	@"$(CONTROLLER)" preflight --config "$(CONFIG_FILE)"
+
+bootstrap: tooling-check
+	@"$(CONTROLLER)" bootstrap --config "$(CONFIG_FILE)"
 
 install:
 	./install.sh

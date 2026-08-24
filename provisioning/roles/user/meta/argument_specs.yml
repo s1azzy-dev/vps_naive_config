@@ -2,4 +2,16 @@
 argument_specs:
   main:
     short_description: Validate inputs for the user role
-    options: {}
+    options:
+      user_name:
+        type: str
+        required: true
+      user_password_hash:
+        type: str
+        required: true
+      user_authorized_key:
+        type: str
+        required: true
+      user_shell:
+        type: str
+        default: /bin/bash

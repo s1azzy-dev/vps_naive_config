@@ -38,6 +38,9 @@
 - запрещённый root login по SSH;
 - запрещённый password и keyboard-interactive login по SSH;
 - UFW с разрешёнными `22/tcp`, `80/tcp`, `443/tcp`;
+- Ansible-owned Docker ingress policy в `DOCKER-USER`, которая разрешает только
+  исходные host ports `80/tcp` и `443/tcp` и блокирует остальные опубликованные
+  container ports независимо от Docker DNAT;
 - Docker Engine и Docker Compose plugin из официального apt-репозитория;
 - root-owned checkout в `/opt/naive-gateway`;
 - runtime-конфигурация `/etc/naive-gateway/gateway.env` с правами `0600`;
@@ -51,12 +54,16 @@
 Ansible не создаёт и не изменяет:
 
 - сам VPS через API провайдера;
-- firewall в панели VPS-провайдера;
+- firewall в панели VPS-провайдера, если такая функция доступна;
 - DNS-записи через API DNS-провайдера;
 - локальный приватный SSH-ключ;
 - клиентскую конфигурацию NaiveProxy.
 
-До `make provision` должны существовать VPS, root/bootstrap SSH-доступ, корректная `A`-запись и provider firewall для `22/tcp`, `80/tcp`, `443/tcp`.
+До `make provision` должны существовать VPS, root/bootstrap SSH-доступ и корректная
+`A`-запись. Provider firewall, если он доступен, рекомендуется как независимый
+defense-in-depth слой для `VPS_PORT/tcp`, `80/tcp`, `443/tcp`, но не является
+предусловием: полный обязательный ingress allowlist применяется внутри VPS до
+первого публичного Docker container.
 
 ## 3. Конфигурационные файлы
 
@@ -200,7 +207,11 @@ Controller реализуется как типизированный Python pac
 1. Выполняется только на disposable VM/VPS, никогда на production host.
 2. Проверяет настоящий systemd, sshd, UFW, Docker, reconnect и lockout-negative scenarios.
 3. Container-based Molecule не считается достаточным доказательством для SSH/UFW/systemd boundary.
-4. `ansible-test` не используется, пока проект не оформлен как Ansible collection; при таком переходе решение пересматривается.
+4. Для Docker обязательно публикует test-only sentinel port на `0.0.0.0`,
+   подтверждает его локальную доступность и внешний отказ при сохранении внешней
+   доступности `80/tcp`/`443/tcp`; тест повторяется после UFW reload, Docker restart
+   и reboot для IPv4 и, если включён, IPv6.
+5. `ansible-test` не используется, пока проект не оформлен как Ansible collection; при таком переходе решение пересматривается.
 
 Make остаётся стабильным пользовательским facade: команды принимают только путь к `.env`, а значения конфигурации через CLI не передаются.
 
@@ -314,8 +325,13 @@ Make остаётся стабильным пользовательским faca
 27. Устанавливает `deny incoming`, `allow outgoing` и rate limit для SSH.
 28. Включает UFW.
 29. Не открывает `443/udp`.
-30. Повторно проверяет новое SSH-соединение после включения UFW.
-31. Выводит итоговые состояния пользователя, SSH и UFW без секретов.
+30. До установки Docker добавляет Ansible-owned UFW after-rules для `DOCKER-USER`:
+    established traffic разрешён; новые соединения к исходным host ports
+    `80/tcp`/`443/tcp` разрешены; остальной ingress к Docker bridge запрещён.
+31. Валидирует candidate rules через `iptables-restore --test`/`ip6tables-restore --test`
+    до UFW reload; ошибочный candidate не применяется.
+32. Повторно проверяет новое SSH-соединение после включения UFW.
+33. Выводит итоговые состояния пользователя, SSH и UFW без секретов.
 
 Успешный результат: root/password SSH закрыт, `VPS_USER` входит по ключу и использует sudo, SSH остаётся доступен.
 
@@ -337,27 +353,37 @@ Make остаётся стабильным пользовательским faca
 10. Проверяет конфликтующие Docker-пакеты; неизвестную существующую установку Docker не удаляет автоматически.
 11. Устанавливает официальный Docker signing key и deb822 apt source.
 12. Устанавливает Docker Engine, CLI, containerd, Buildx и Compose plugin.
-13. Включает и запускает Docker service.
-14. Проверяет `docker version` и `docker compose version`.
-15. Не даёт `VPS_USER` доступ к Docker socket.
-16. Создаёт `/opt/naive-gateway` как root-owned deployment directory.
-17. Клонирует `GATEWAY_REPOSITORY` или обновляет существующий checkout.
-18. Получает только заданный `GATEWAY_REF` и проверяет фактический commit.
-19. Не выполняет неявный переход на `latest`.
-20. Создаёт `/etc/naive-gateway` с владельцем `root:root`.
-21. Если `gateway.env` существует, читает его значения без вывода и сохраняет Naive credentials.
-22. Если `gateway.env` отсутствует, использует явно заданные Naive credentials либо генерирует криптографически случайные значения один раз.
-23. Записывает runtime-файл атомарно с правами `0600`.
-24. Проверяет Docker Compose config с `versions.env` и серверным `gateway.env`.
-25. Собирает закреплённый образ Caddy.
-26. До изменения запущенного контейнера выполняет `caddy validate` для новой конфигурации.
-27. Запускает или обновляет Compose project.
-28. Ожидает container healthcheck.
-29. Ожидает публичный HTTPS с валидным сертификатом.
-30. При ошибке показывает безопасный диагностический tail логов без вывода credentials.
-31. Запускает `scripts/check-server.sh`.
-32. Выводит endpoint и credentials только в финальном интерактивном summary.
-33. Не меняет SSH, пользователя и firewall, кроме проверки их состояния.
+13. До первого запуска daemon устанавливает `daemon.json`: Docker firewall
+    включён, backend закреплён как `iptables`, direct routing выключен, а
+    default bind для неявно опубликованных user-defined bridge ports равен
+    `127.0.0.1`.
+14. Включает и запускает Docker service только после активной host ingress policy.
+15. Проверяет `docker version`, `docker compose version`, фактический firewall
+    backend и наличие точного `DOCKER-USER` jump/rules без дубликатов.
+16. Не даёт `VPS_USER` доступ к Docker socket; Docker API по TCP и socket mount
+    в application containers запрещены.
+17. Запрещает для MVP `network_mode: host`, `macvlan`, `ipvlan`, Swarm и Docker
+    direct routing: эти режимы обходят принятую bridge/`DOCKER-USER` boundary.
+18. Требует явного public bind только для Caddy `80/tcp` и `443/tcp`; сокращённые
+    будущие `ports` остаются loopback-only по безопасному daemon default.
+19. Создаёт `/opt/naive-gateway` как root-owned deployment directory.
+20. Клонирует `GATEWAY_REPOSITORY` или обновляет существующий checkout.
+21. Получает только заданный `GATEWAY_REF` и проверяет фактический commit.
+22. Не выполняет неявный переход на `latest`.
+23. Создаёт `/etc/naive-gateway` с владельцем `root:root`.
+24. Если `gateway.env` существует, читает его значения без вывода и сохраняет Naive credentials.
+25. Если `gateway.env` отсутствует, использует явно заданные Naive credentials либо генерирует криптографически случайные значения один раз.
+26. Записывает runtime-файл атомарно с правами `0600`.
+27. Проверяет Docker Compose config с `versions.env` и серверным `gateway.env`.
+28. Собирает закреплённый образ Caddy.
+29. До изменения запущенного контейнера выполняет `caddy validate` для новой конфигурации.
+30. Запускает или обновляет Compose project.
+31. Ожидает container healthcheck.
+32. Ожидает публичный HTTPS с валидным сертификатом.
+33. При ошибке показывает безопасный диагностический tail логов без вывода credentials.
+34. Запускает `scripts/check-server.sh`.
+35. Выводит endpoint и credentials только в финальном интерактивном summary.
+36. Не меняет SSH, пользователя и firewall, кроме проверки их состояния.
 
 Успешный результат: контейнер healthy, публичный сайт и авторизованный proxy работают, credentials сохранены.
 
@@ -525,7 +551,9 @@ Gate 1:
 - добавить `ansible.cfg`, `requirements.yml`, playbooks и пустые роли;
 - закрепить совместимые версии `ansible-core`, ansible-lint и реально используемых collections;
 - не добавлять collection без используемого модуля;
-- добавить `community.docker` с точной версией в фазе Docker одновременно с первым использующим её модулем;
+- добавить `community.docker` с точной версией одновременно с первым использующим её
+  модулем: test-only Docker driver в Phase 4; production roles начнут использовать
+  collection только в фазе Docker;
 - реализовать `make tooling`;
 - добавить syntax-check, ansible-lint и secret scan;
 - исключить secret output через `no_log` и callback settings.
@@ -686,16 +714,77 @@ Gate 3.6:
 - до реализации tasks добавить Molecule scenario и pytest-testinfra assertions для user/SSH role contracts;
 - container-capable assertions выполнять в Molecule, а настоящий reconnect/lockout сценарий — на disposable VM/VPS.
 
+Проверяемая последовательность Phase 4:
+
+1. Закрепить Molecule, Docker driver и pytest-testinfra в `pyproject.toml`/`uv.lock`,
+   добавить `make molecule` и scenario на закреплённом Debian 12 container image.
+2. До реализации roles добавить converge/idempotence/verify contract: prerequisites,
+   allowlist ОС/архитектуры, user/home/sudo, exact `authorized_keys`, SSH effective config
+   и rejection ошибочного drop-in. Ожидаемый RED фиксируется как доказательство TDD boundary.
+3. Реализовать только `bootstrap`: raw-установка Python/sudo, facts, allowlist
+   Ubuntu 22.04/24.04/26.04 и Debian 12/13, `x86_64`/`aarch64`, проверка времени.
+4. Реализовать только `user`: создание account/home/sudo membership, первоначальная
+   установка пароля и exact public key; на повторном запуске password и key неизменны.
+5. Реализовать controller-side `make bootstrap`: `.env` читает Python, sudo-пароль
+   запрашивается дважды без echo и передаётся Ansible только через inherited pipe,
+   не через inventory, process arguments, environment или task logs.
+6. После user role открыть отдельное соединение под `VPS_USER` и проверить key login
+   и password-backed sudo; до успеха SSH hardening не запускается.
+7. Реализовать `ssh`: отдельный drop-in, атомарный template с `sshd -t` validation,
+   reload только handler-ом после успешной validation.
+8. После hardening открыть новое managed-user connection и выполнить отрицательные
+   root/key и password/keyboard-interactive probes. Container assertions не заменяют
+   reconnect/lockout-negative E2E на disposable VM/VPS.
+
+Журнал Phase 4:
+
+- 2026-08-23 baseline, фактический clean HEAD `1c508c4` (`main/origin/main`):
+  `make lint` PASS; `make test` PASS, 44 tests на Python 3.14.6.
+- 2026-08-24 test harness: pinned `molecule 26.6.0`,
+  `molecule-plugins[docker] 26.7.15`, `pytest-testinfra 10.2.2`, collections и
+  Debian 12 OCI digest добавлены; `make lint` PASS; `make test` PASS, 44 tests;
+  `make molecule` ожидаемо RED после успешных `syntax/create` на пустом
+  `bootstrap` argument contract. Scenario provisioning и teardown исправны.
+- 2026-08-24 roles `bootstrap` + `user`: `make lint` PASS; `make test` PASS,
+  44 tests; Molecule `converge` PASS и `idempotence` PASS. В Debian 12 container
+  проверены raw-установка Python/sudo, OS/architecture/time allowlist, создание
+  account/home/sudo group, sudo с введённым паролем, exact public key и сохранение
+  исходного shadow hash на втором run. Ожидаемый RED теперь только в `side_effect`
+  из-за ещё отсутствующего SSH drop-in.
+- 2026-08-24 controller bootstrap boundary: добавлен `make bootstrap`; Python
+  выполняет preflight, дважды без echo запрашивает sudo password, передаёт plaintext
+  Ansible через inherited pipe `/dev/fd`, открывает отдельный managed-user play с
+  password-backed sudo до SSH role и выполняет post-hardening key/root/auth-method
+  probes. `make lint` PASS; `make test` PASS, 53 tests, включая отсутствие password
+  в argv/environment, recovery/skip state и blocking post-checks.
+- 2026-08-24 локальная/Molecule часть Phase 4: **PASS**. Production
+  `bootstrap.yml` выполнен самим scenario; Molecule `converge`, `idempotence`,
+  invalid-template `side_effect`, 6 pytest-testinfra assertions и teardown — PASS.
+  Candidate и full config проходят `sshd -t`; effective `sshd -T` подтверждает
+  public-key only, root/password/keyboard-interactive settings. Финально:
+  `make lint` PASS; `make test` PASS, 54 tests на Python 3.14.6; реальный
+  `ansible-playbook --syntax-check` через inherited extra-vars pipe PASS;
+  `git diff --check` PASS.
+
+Gate 4 целиком остаётся **OPEN**: локальный `.env` отсутствует, disposable VM/VPS
+не предоставлен, поэтому настоящий managed-user reconnect, root/password lockout-negative
+и повторный E2E bootstrap не выполнялись.
+
+Согласованное исключение (2026-08-24): владелец production VPS отложил disposable
+E2E и разрешил перейти к Phase 5. Это исключение не закрывает Gate 4, не разрешает
+изменять production VPS и ограничивает следующие фазы локальными, CI и Molecule
+проверками до появления отдельной disposable VM/VPS.
+
 Gate 4:
 
 - [ ] новый пользователь входит по ключу;
-- [ ] sudo принимает заданный пароль;
+- [x] sudo принимает заданный пароль в Debian 12 Molecule instance;
 - [ ] root SSH login запрещён;
 - [ ] password и keyboard-interactive login запрещены;
-- [ ] `sshd -t` проходит;
-- [ ] повторный bootstrap не меняет пароль и authorized key;
-- [ ] искусственно ошибочный SSH template не применяется и не вызывает lockout.
-- [ ] Molecule converge/idempotence/verify и pytest-testinfra проходят;
+- [x] `sshd -t` проходит для candidate и полной конфигурации в Molecule;
+- [x] повторный role converge не меняет пароль и authorized key;
+- [x] искусственно ошибочный SSH template не применяется и не ломает работающий sshd;
+- [x] Molecule converge/idempotence/verify и pytest-testinfra проходят;
 - [ ] disposable VM/VPS reconnect и lockout-negative E2E проходят.
 
 ### Этап 5. Реализовать host firewall
@@ -708,15 +797,78 @@ Gate 4:
 - разрешить только `80/tcp` и `443/tcp` для gateway;
 - включить UFW;
 - проверить SSH после включения;
-- документировать Docker/UFW boundary и обязательность provider firewall.
+- до первого Docker daemon подготовить Ansible-owned `DOCKER-USER` ingress policy;
+- валидировать IPv4/IPv6 candidate rules до UFW reload и не применять ошибочные rules;
+- документировать Docker/UFW boundary и опциональный provider firewall.
 - выполнить destructive firewall проверки на disposable VM/VPS.
+
+Проверяемая последовательность Phase 5:
+
+1. Подтвердить неизменный Phase 4 baseline командами `make lint`, `make test` и
+   `make molecule` без обращения к VPS.
+2. Закрепить `community.general`, добавить typed role contract и до реализации
+   firewall tasks расширить Molecule/pytest-testinfra проверками package, default
+   policies, allowlist `22/tcp`, `80/tcp`, `443/tcp`, отсутствия `443/udp` и
+   идемпотентности. Ожидаемый RED зафиксировать в журнале.
+3. Реализовать role в безопасном порядке: установить UFW, задать default policies,
+   разрешить текущий SSH port и gateway TCP ports, затем включить UFW.
+4. Подключить role к production playbook только после managed-user SSH hardening;
+   controller после playbook обязан выполнить уже существующий новый SSH probe.
+5. Проверить `make lint`, `make test`, Molecule converge/idempotence/verify и
+   `git diff --check`; документировать границы Docker/UFW/provider firewall.
+6. Добавить TDD contract для `DOCKER-USER`: exact Ansible-owned chains, original
+   host-port allowlist `80/tcp`/`443/tcp`, established traffic, default drop для
+   Docker bridges, IPv4/IPv6 candidate validation и rejection ошибочного template.
+7. Реализовать policy как закреплённый UFW after-rules block до Docker installation;
+   не скачивать и не исполнять сторонний `ufw-docker` root script.
+8. Оставить настоящий SSH reconnect, внешний port scan и destructive UFW/Docker E2E
+   открытыми до disposable VM/VPS; production VPS не использовать.
+
+Журнал Phase 5:
+
+- 2026-08-24 baseline после согласованного переноса disposable E2E: `make lint`
+  PASS; `make test` PASS, 54 tests на Python 3.14.6; существующий Phase 4
+  `make molecule` PASS (converge/idempotence/side-effect/verify/destroy).
+- 2026-08-24 firewall test contract: закреплена `community.general 13.3.0`,
+  добавлены typed role inputs, Docker `NET_ADMIN` и pytest-testinfra assertions
+  для package/default policies/active state/exact rules/no `443/udp`. `make lint`
+  PASS; `make test` PASS, 54 tests; `make molecule` ожидаемо RED: обе Phase 5
+  assertions падают только из-за отсутствующих package `ufw` и binary `/usr/sbin/ufw`.
+- 2026-08-24 firewall role и orchestration: production `bootstrap.yml` применяет
+  UFW только после managed-user sudo check и SSH hardening; controller передаёт
+  фактический `VPS_PORT` и после playbook открывает новое SSH-соединение. Role
+  устанавливает UFW, отказывается перезаписывать чужие rules, добавляет SSH rate
+  limit и только `80/tcp`/`443/tcp` до enable, задаёт deny-in/allow-out и проверяет
+  active state. `make lint` PASS; `make test` PASS, 54 tests; `make molecule` PASS:
+  converge/idempotence, negative unmanaged-rule side effect, 9 testinfra assertions
+  и destroy. `git diff --check` PASS; Docker/UFW/provider boundary документирован;
+  production VPS не затронут.
+- 2026-08-24 Docker-ingress TDD contract: до tasks добавлены exact IPv4/IPv6
+  `DOCKER-USER`/`NAIVE-GATEWAY-DOCKER` assertions, проверка original destination
+  `80/tcp`/`443/tcp`, bridge default-drop и side-effect с ошибочным restore
+  candidate. Первый повторный запуск Molecule не дошёл до scenario из-за
+  sandbox-denied доступа к OrbStack socket; после разрешения локального disposable
+  Docker access тестовый цикл выполнен полностью.
+- 2026-08-24 Docker-ingress implementation: candidate rules сначала рендерятся в
+  памяти и проходят `iptables-restore --test`/`ip6tables-restore --test`, затем
+  помещаются в root-owned UFW after-rules и активируются reload handler.
+  Невалидный candidate не меняет файл или активную policy. `make lint` PASS;
+  `make test` PASS, 54 tests; `make molecule` PASS: converge, idempotence,
+  negative invalid-template side effect, 12 testinfra assertions и destroy;
+  `git diff --check` PASS. Production VPS не затронут.
+
+Локальная/Molecule часть Phase 5, включая host-enforced Docker ingress boundary:
+**PASS**. Настоящий reconnect,
+внешний port scan и destructive UFW/Docker E2E остаются только для disposable VM/VPS.
 
 Gate 5:
 
 - [ ] SSH остаётся доступен;
-- [ ] разрешены ровно ожидаемые host ports;
-- [ ] `443/udp` закрыт;
-- [ ] повторный запуск не создаёт дубликаты правил;
+- [x] в Debian 12 Molecule разрешены ровно `22/tcp`, `80/tcp`, `443/tcp`;
+- [x] `443/udp` отсутствует в UFW rules и блокируется default deny в Molecule;
+- [x] Molecule idempotence проходит и exact rules не содержат дубликатов;
+- [x] Ansible-owned IPv4/IPv6 `DOCKER-USER` candidate проходит restore validation;
+- [x] ошибочный Docker ingress candidate не изменяет активные UFW rules;
 - [ ] внешний port scan после deploy не показывает неожиданных портов.
 - [ ] disposable VM/VPS подтверждает доступность SSH после фактического включения UFW.
 
@@ -731,17 +883,105 @@ Gate 5:
 - установить Engine/CLI/containerd/Buildx/Compose;
 - включить service;
 - проверить версии;
+- сохранить Docker firewall management включённым и закрепить backend `iptables`;
+- установить безопасный default bind `127.0.0.1` для неявных user-defined bridge publications;
+- проверить, что UFW загружает Ansible-owned `DOCKER-USER` policy до Docker;
+- разрешить только original host ports `80/tcp`/`443/tcp`, блокируя случайные
+  explicit public mappings к тем же container ports;
+- запретить direct routing, host/macvlan/ipvlan networking и Swarm в MVP;
 - убрать Docker installation из `install.sh` на переходном этапе.
 - добавить Molecule/pytest-testinfra проверки поддерживаемой части роли и disposable VM/VPS systemd E2E.
+
+Проверяемая последовательность Phase 6:
+
+1. Закрепить source identity hardening-плана и подтвердить Phase 5 baseline:
+   `make lint`, `make test`, `make molecule`, `git diff --check`.
+2. До Docker tasks добавить typed argument contract и testinfra assertions для
+   official repo/key, exact package set, `daemon.json`, enabled/active daemon,
+   Compose v2, root-only socket, отсутствия `VPS_USER` в `docker` group и
+   `DOCKER-USER` rule ordering. Ожидаемый RED зафиксировать.
+3. До package installation обнаружить legacy/conflicting/unmanaged Docker artifacts;
+   неизвестную установку или чужой `daemon.json` не менять и завершать понятной ошибкой.
+4. На чистом host сначала установить минимальные apt prerequisites и management marker,
+   затем валидированные UFW Docker-ingress rules и безопасный `daemon.json`; только
+   после этого добавлять официальный deb822 repository и устанавливать Docker packages.
+5. Запустить daemon, проверить firewall backend, direct-routing policy, default bind,
+   versions/socket/group invariants и точное отсутствие unmanaged `DOCKER-USER` rules.
+6. В Molecule повторить converge/idempotence, UFW reload и Docker restart; rules
+   должны сохраняться без дубликатов. Ошибочный candidate и unmanaged installation
+   должны отклоняться без автоматического удаления или ослабления firewall.
+7. Изменить Compose: публичные Caddy binds `80/tcp`/`443/tcp` объявляются явно;
+   repository contract запрещает host/macvlan/ipvlan/Swarm/direct-routing и
+   application mounts Docker socket.
+8. Проверить `make lint`, `make test`, `make molecule`, Compose config/runtime smoke
+   и `git diff --check`; записать результаты в журнал.
+9. Оставить systemd boot ordering, реальный внешний sentinel-port test, IPv4/IPv6
+   port scan и reboot E2E открытыми до disposable VM/VPS; production VPS не использовать.
+
+Журнал Phase 6:
+
+- 2026-08-24 hardening baseline, HEAD `1c508c4`, исходный working diff
+  `sha256:f68893c032ff31b404478442ce52ce59cd80832ebf16d1b04985bbb9fade2252`:
+  `make lint` PASS; `make test` PASS, 54 tests; Phase 5 `make molecule` PASS;
+  `git diff --check` PASS. Выбран native `DOCKER-USER` + loopback-safe defaults;
+  provider firewall недоступен и больше не является обязательным предусловием.
+- 2026-08-25 Phase 6 TDD contract: добавлены typed Docker role inputs,
+  pytest-testinfra assertions для official deb822 repo, pinned key SHA-256 и
+  fingerprint, exact package set, Compose v2, `daemon.json`, marker, privilege
+  boundary, effective default bind и UFW/restart persistence. Repository tests
+  требуют явные `0.0.0.0:80:80/tcp`/`0.0.0.0:443:443/tcp`, запрещают Docker
+  socket и host/macvlan/ipvlan network boundary. `make test` ожидаемо RED:
+  2/56 tests падали только на отсутствующих role defaults/tasks и старых Compose
+  binds; Molecule ожидаемо RED после успешных syntax/converge/idempotence на
+  отсутствующем `/etc/naive-gateway/docker-managed`.
+- 2026-08-25 Docker role implementation: clean-host adoption, root-owned marker,
+  validated fail-closed daemon policy, pinned official key, deb822 repository и
+  packages `docker-ce`, CLI, containerd, Buildx и Compose v2. Неизвестные
+  package/binary/repository/config artifacts не удаляются и не принимаются без
+  marker; firewall также отказывает до любых UFW mutations, если находит
+  unmanaged Docker. Пакетные версии намеренно следуют `state: present` в
+  official stable repository, чтобы получать security updates; immutable
+  identity закреплена checksum/fingerprint ключа и exact package names.
+- 2026-08-25 transitional boundary: `install.sh` больше не устанавливает и не
+  настраивает Docker, а требует Ansible-managed marker и Compose v2. Compose
+  публикует только explicit IPv4 TCP 80/443; неявные user-defined bridge binds
+  проверяются как `127.0.0.1`. `make lint` PASS; `make test` PASS, 57 tests;
+  `git diff --check` PASS.
+- 2026-08-25 Molecule runtime: первый nested daemon restart дал RED из-за гонки
+  test harness — socket исчезал до завершения первого `dockerd`; после ожидания
+  фактического PID exit полный цикл PASS: syntax, converge, idempotence,
+  side-effect, 18 testinfra assertions и destroy. В privileged Debian 12
+  container реально стартовал Docker, user-defined network получил loopback
+  bind, UFW reload и Docker restart сохранили exact ingress chains, unmanaged
+  Docker adoption/firewall reconciliation были отклонены. Production VPS не
+  затронут.
+- 2026-08-25 Compose/runtime checks: repository pytest выполняет Compose config
+  с isolated fake env и подтверждает exact public TCP binds. `make validate`
+  ожидаемо не запускался без вручную созданного пользовательского `.env`; Codex
+  не создавал и не читал этот файл. Независимый `tests/smoke-local.sh` PASS:
+  локальный TLS/HTTP2, сайт, authenticated CONNECT и log-redaction contract.
+- 2026-08-25 final local gate после усиления marker ownership: `make lint` PASS;
+  `make test` PASS, 57 tests; hardening JSON parse и `git diff --check` PASS;
+  `make molecule` PASS — все 8 actions, включая converge/idempotence,
+  side-effect, verify и final destroy. VPS connections не выполнялись.
+
+Локальная/Molecule часть Phase 6 для Debian 12: **PASS**. Gate 6 остаётся
+**IN PROGRESS**: systemd enable/boot ordering, остальные поддерживаемые ОС,
+внешний sentinel/port scan и reboot требуют disposable VM/VPS.
 
 Gate 6:
 
 - [ ] Docker устанавливается на каждой поддерживаемой ОС;
 - [ ] Docker service enabled и active;
-- [ ] Compose v2 доступен;
-- [ ] пользователь не входит в `docker` group;
-- [ ] повторный запуск не переустанавливает Docker без причины;
-- [ ] неизвестная существующая Docker installation не удаляется автоматически.
+- [x] Compose v2 доступен в Debian 12 Molecule;
+- [x] пользователь не входит в `docker` group в Molecule;
+- [x] повторный converge не переустанавливает Docker без причины;
+- [x] неизвестная существующая Docker installation не удаляется автоматически.
+- [x] Docker daemon candidate закрепляет backend `iptables` и выключает direct routing;
+- [x] неявные user-defined bridge publications bind-ятся к `127.0.0.1` в nested Docker;
+- [x] `DOCKER-USER` разрешает только original host `80/tcp`/`443/tcp` и не содержит дубликатов;
+- [x] UFW reload и Docker restart не снимают Docker ingress policy в Molecule;
+- [ ] explicit sentinel mapping `0.0.0.0:18080` недоступен извне;
 - [ ] Molecule idempotence и disposable VM/VPS Docker service E2E проходят.
 
 ### Этап 7. Перенести Naive Gateway deployment в Ansible
@@ -853,7 +1093,8 @@ Provisioning считается завершённым только если о�
 - [ ] публичный ключ и fingerprint корректны;
 - [ ] root/password SSH login запрещены;
 - [ ] повторное SSH-подключение проверено после hardening и UFW;
-- [ ] provider firewall документирован как обязательный внешний boundary;
+- [ ] host `DOCKER-USER` является обязательной Docker ingress boundary; provider
+      firewall документирован как опциональный defense-in-depth слой;
 - [ ] на VPS открыты только ожидаемые порты;
 - [ ] Docker установлен из официального репозитория;
 - [ ] пользователь не имеет доступа к Docker socket;

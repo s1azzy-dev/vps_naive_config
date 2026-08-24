@@ -1,0 +1,22 @@
+---
+docker_manage_service: true
+docker_managed_user: "{{ ansible_user | default(ansible_user_id) }}"
+docker_apt_key_sha256: 1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570
+docker_apt_key_fingerprint: 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
+docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+docker_conflicting_packages:
+  - docker.io
+  - docker-compose
+  - docker-compose-v2
+  - docker-doc
+  - podman-docker
+  - containerd
+  - runc
+docker_default_bind_ipv4: 127.0.0.1
+docker_firewall_backend: iptables
+docker_daemon_template: daemon.json.j2

@@ -15,8 +15,8 @@ services:
       NAIVE_USER: ${NAIVE_USER:?NAIVE_USER is required}
       NAIVE_PASSWORD: ${NAIVE_PASSWORD:?NAIVE_PASSWORD is required}
     ports:
-      - "80:80/tcp"
-      - "443:443/tcp"
+      - "0.0.0.0:80:80/tcp"
+      - "0.0.0.0:443:443/tcp"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./site:/srv/www:ro

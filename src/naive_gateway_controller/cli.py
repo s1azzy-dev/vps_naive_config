@@ -10,13 +10,14 @@ from pathlib import Path
 from naive_gateway_controller.config import load_settings
 from naive_gateway_controller.errors import ControllerError
 from naive_gateway_controller.preflight import run_preflight
+from naive_gateway_controller.provisioning import BootstrapOutcome, run_bootstrap
 from naive_gateway_controller.tooling import check_tooling, install_collections, project_root
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gateway-controller")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("check-config", "preflight"):
+    for command in ("check-config", "preflight", "bootstrap"):
         subparser = subparsers.add_parser(command)
         subparser.add_argument("--config", type=Path, default=Path(".env"))
     subparsers.add_parser("tooling-check")
@@ -39,6 +40,16 @@ def _print_preflight(config_path: Path) -> None:
     print("Preflight: PASS")
 
 
+def _print_bootstrap(config_path: Path) -> None:
+    settings = load_settings(config_path)
+    print("Configuration: OK")
+    outcome = run_bootstrap(settings)
+    if outcome is BootstrapOutcome.SKIPPED:
+        print("Bootstrap: SKIP (managed host already hardened)")
+    else:
+        print("Bootstrap: PASS")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one controller command and render only safe expected failures."""
     arguments = _parser().parse_args(argv)
@@ -48,6 +59,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("Configuration: OK")
         elif arguments.command == "preflight":
             _print_preflight(arguments.config)
+        elif arguments.command == "bootstrap":
+            _print_bootstrap(arguments.config)
         elif arguments.command == "tooling-check":
             check_tooling()
         elif arguments.command == "install-collections":

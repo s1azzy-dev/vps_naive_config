@@ -1,0 +1,11 @@
+---
+- name: Validate the complete OpenSSH configuration
+  ansible.builtin.command: /usr/sbin/sshd -t
+  changed_when: false
+  listen: Validate and reload OpenSSH
+
+- name: Reload OpenSSH without terminating established sessions
+  ansible.builtin.service:
+    name: ssh
+    state: reloaded
+  listen: Validate and reload OpenSSH

@@ -1,3 +1,322 @@
 ---
-# Implemented in phase 6.
-[]
+- name: Require a supported Docker target
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution in ['Debian', 'Ubuntu']
+      - >-
+        (ansible_distribution == 'Debian' and ansible_distribution_major_version in ['12', '13']) or
+        (ansible_distribution == 'Ubuntu' and ansible_distribution_version in ['22.04', '24.04', '26.04'])
+      - ansible_architecture in ['x86_64', 'aarch64']
+      - ansible_distribution_release | length > 0
+      - docker_managed_user | length > 0
+      - docker_apt_key_sha256 is match('^[0-9a-f]{64}$')
+      - docker_apt_key_fingerprint is match('^[0-9A-F]{40}$')
+      - docker_packages | length == 5
+      - docker_default_bind_ipv4 == '127.0.0.1'
+      - docker_firewall_backend == 'iptables'
+    fail_msg: >-
+      Unsupported or unsafe Docker role inputs for {{ ansible_distribution }}
+      {{ ansible_distribution_version }} on {{ ansible_architecture }}.
+    quiet: true
+
+- name: Inspect the Docker management marker
+  ansible.builtin.stat:
+    path: /etc/naive-gateway/docker-managed
+  register: docker_management_marker
+
+- name: Require a trustworthy existing Docker management marker
+  ansible.builtin.assert:
+    that:
+      - docker_management_marker.stat.isreg | default(false)
+      - docker_management_marker.stat.pw_name == 'root'
+      - docker_management_marker.stat.gr_name == 'root'
+      - docker_management_marker.stat.mode == '0600'
+    fail_msg: >-
+      The Docker management marker exists but is not a root-owned 0600 regular file.
+    quiet: true
+  when: docker_management_marker.stat.exists
+
+- name: Gather installed package facts before Docker adoption
+  ansible.builtin.package_facts:
+    manager: auto
+
+- name: Inspect Docker artifacts before adoption
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /usr/bin/docker
+    - /usr/bin/dockerd
+    - /etc/docker/daemon.json
+    - /etc/apt/keyrings/docker.asc
+    - /etc/apt/sources.list.d/docker.list
+    - /etc/apt/sources.list.d/docker.sources
+  loop_control:
+    label: "{{ item }}"
+  register: docker_existing_artifacts
+
+- name: Derive existing Docker package and artifact state
+  ansible.builtin.set_fact:
+    docker_existing_packages: >-
+      {{ (docker_packages + docker_conflicting_packages) |
+         intersect(ansible_facts.packages.keys() | list) | sort }}
+    docker_existing_artifact_paths: >-
+      {{ docker_existing_artifacts.results |
+         selectattr('stat.exists') | map(attribute='item') | list }}
+
+- name: Refuse to adopt an unmanaged Docker installation
+  ansible.builtin.assert:
+    that:
+      - docker_existing_packages | length == 0
+      - docker_existing_artifact_paths | length == 0
+    fail_msg: >-
+      Existing Docker state is not marked as managed by this project. Refusing
+      automatic adoption. Packages={{ docker_existing_packages }};
+      artifacts={{ docker_existing_artifact_paths }}.
+    quiet: true
+  when: not docker_management_marker.stat.exists
+
+- name: Require the prepared Docker ingress policy
+  ansible.builtin.command:
+    argv:
+      - "/usr/sbin/{{ item }}"
+      - --check
+      - DOCKER-USER
+      - --jump
+      - NAIVE-GATEWAY-DOCKER
+  loop:
+    - iptables
+    - ip6tables
+  loop_control:
+    label: "{{ item }}"
+  changed_when: false
+
+- name: Create the root-owned Docker management directory
+  ansible.builtin.file:
+    path: /etc/naive-gateway
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Mark Docker state as managed before installation
+  ansible.builtin.copy:
+    content: "managed-by=naive-gateway-ansible\n"
+    dest: /etc/naive-gateway/docker-managed
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Create the Docker configuration directory
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render the Docker daemon candidate in memory
+  ansible.builtin.set_fact:
+    docker_daemon_candidate: >-
+      {{ lookup('ansible.builtin.template', docker_daemon_template) }}
+
+- name: Validate the Docker daemon candidate
+  ansible.builtin.assert:
+    that:
+      - (docker_daemon_candidate | from_json)['allow-direct-routing'] == false
+      - (docker_daemon_candidate | from_json)['firewall-backend'] == 'iptables'
+      - (docker_daemon_candidate | from_json)['iptables'] == true
+      - (docker_daemon_candidate | from_json)['ip6tables'] == true
+      - >-
+        (docker_daemon_candidate | from_json)['default-network-opts']['bridge']
+        ['com.docker.network.bridge.host_binding_ipv4'] == '127.0.0.1'
+    fail_msg: The Docker daemon candidate does not preserve the required firewall boundary.
+    quiet: true
+
+- name: Install the validated Docker daemon configuration
+  ansible.builtin.copy:
+    content: "{{ docker_daemon_candidate }}"
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Docker
+
+- name: Install Docker repository prerequisites
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - gnupg
+      - python3-debian
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the apt keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the pinned official Docker signing key
+  ansible.builtin.get_url:
+    url: "https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg"
+    dest: /etc/apt/keyrings/docker.asc
+    checksum: "sha256:{{ docker_apt_key_sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Read the Docker signing-key fingerprint
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/gpg
+      - --batch
+      - --show-keys
+      - --with-colons
+      - /etc/apt/keyrings/docker.asc
+  register: docker_signing_key
+  changed_when: false
+
+- name: Require the official Docker signing-key fingerprint
+  ansible.builtin.assert:
+    that:
+      - "('fpr:::::::::' ~ docker_apt_key_fingerprint ~ ':') in docker_signing_key.stdout"
+    fail_msg: The downloaded Docker signing key has an unexpected fingerprint.
+    quiet: true
+
+- name: Configure the official Docker deb822 repository
+  ansible.builtin.deb822_repository:
+    name: docker
+    types:
+      - deb
+    uris:
+      - "https://download.docker.com/linux/{{ ansible_distribution | lower }}"
+    suites:
+      - "{{ ansible_distribution_release }}"
+    components:
+      - stable
+    architectures:
+      - "{{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64' }}"
+    signed_by: /etc/apt/keyrings/docker.asc
+    enabled: true
+    state: present
+    mode: "0644"
+  register: docker_repository
+
+- name: Install Docker Engine and Compose v2
+  ansible.builtin.apt:
+    name: "{{ docker_packages }}"
+    state: present
+    update_cache: "{{ docker_repository.changed }}"
+
+- name: Validate the installed Docker daemon configuration
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/dockerd
+      - --validate
+      - --config-file=/etc/docker/daemon.json
+  changed_when: false
+
+- name: Enable and start Docker
+  ansible.builtin.service:
+    name: docker
+    enabled: true
+    state: started
+  when: docker_manage_service
+
+- name: Apply a changed Docker daemon configuration
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify Docker Engine and Compose v2 commands
+  ansible.builtin.command:
+    argv: "{{ item }}"
+  loop:
+    - - /usr/bin/docker
+      - --version
+    - - /usr/bin/docker
+      - compose
+      - version
+  loop_control:
+    label: "{{ item | join(' ') }}"
+  changed_when: false
+
+- name: Read the managed user's supplementary groups
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/id
+      - --groups
+      - --name
+      - "{{ docker_managed_user }}"
+  register: docker_managed_user_groups
+  changed_when: false
+
+- name: Keep the managed user outside the Docker root-equivalent group
+  ansible.builtin.assert:
+    that:
+      - "'docker' not in docker_managed_user_groups.stdout.split()"
+    fail_msg: "{{ docker_managed_user }} must not belong to the docker group."
+    quiet: true
+
+- name: Inspect the Docker socket
+  ansible.builtin.stat:
+    path: /var/run/docker.sock
+  register: docker_socket
+  when: docker_manage_service
+
+- name: Require a root-owned Docker socket
+  ansible.builtin.assert:
+    that:
+      - docker_socket.stat.issock | default(false)
+      - docker_socket.stat.pw_name == 'root'
+      - docker_socket.stat.gr_name == 'docker'
+      - docker_socket.stat.mode == '0660'
+    fail_msg: The Docker socket does not have the required root:docker 0660 ownership.
+    quiet: true
+  when: docker_manage_service
+
+- name: Read the effective Docker ingress chains
+  ansible.builtin.command:
+    argv:
+      - "/usr/sbin/{{ item.binary }}"
+      - -S
+      - "{{ item.chain }}"
+  loop:
+    - binary: iptables
+      chain: DOCKER-USER
+    - binary: iptables
+      chain: NAIVE-GATEWAY-DOCKER
+    - binary: ip6tables
+      chain: DOCKER-USER
+    - binary: ip6tables
+      chain: NAIVE-GATEWAY-DOCKER
+  loop_control:
+    label: "{{ item.binary }} {{ item.chain }}"
+  register: docker_effective_ingress_chains
+  changed_when: false
+
+- name: Require one managed Docker ingress jump for both address families
+  ansible.builtin.assert:
+    that:
+      - docker_effective_ingress_chains.results[0].stdout_lines == docker_expected_user_chain
+      - docker_effective_ingress_chains.results[1].stdout_lines == docker_expected_managed_chain
+      - docker_effective_ingress_chains.results[2].stdout_lines == docker_expected_user_chain
+      - docker_effective_ingress_chains.results[3].stdout_lines == docker_expected_managed_chain
+    fail_msg: The effective Docker ingress policy is missing, reordered or duplicated.
+    quiet: true
+  vars:
+    docker_expected_user_chain:
+      - -N DOCKER-USER
+      - -A DOCKER-USER -j NAIVE-GATEWAY-DOCKER
+      - -A DOCKER-USER -j RETURN
+    docker_expected_managed_chain:
+      - -N NAIVE-GATEWAY-DOCKER
+      - -A NAIVE-GATEWAY-DOCKER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+      - -A NAIVE-GATEWAY-DOCKER -o docker0 -p tcp -m conntrack --ctstate NEW --ctorigdstport 80 -j RETURN
+      - -A NAIVE-GATEWAY-DOCKER -o docker0 -p tcp -m conntrack --ctstate NEW --ctorigdstport 443 -j RETURN
+      - -A NAIVE-GATEWAY-DOCKER -o br+ -p tcp -m conntrack --ctstate NEW --ctorigdstport 80 -j RETURN
+      - -A NAIVE-GATEWAY-DOCKER -o br+ -p tcp -m conntrack --ctstate NEW --ctorigdstport 443 -j RETURN
+      - -A NAIVE-GATEWAY-DOCKER -o docker0 -j DROP
+      - -A NAIVE-GATEWAY-DOCKER -o br+ -j DROP
+      - -A NAIVE-GATEWAY-DOCKER -j RETURN

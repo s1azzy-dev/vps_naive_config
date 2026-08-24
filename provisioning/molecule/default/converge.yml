@@ -1,0 +1,80 @@
+---
+- name: Exercise the production Phase 4 bootstrap playbook
+  ansible.builtin.import_playbook: ../../playbooks/bootstrap.yml
+  vars:
+    bootstrap_target: all
+    bootstrap_apply_user: true
+    bootstrap_controller_epoch: "{{ now().timestamp() | int }}"
+    bootstrap_user_name: root
+    molecule_managed_user: molecule_admin
+    molecule_public_key: >-
+      ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOZGc3eD7DMtNLskGutOfXw7ZmiK4B9Hl0+7wYs2qIib molecule-phase4
+    molecule_password_file: "{{ molecule_ephemeral_directory }}/managed-password"
+    molecule_password: >-
+      {{ lookup('ansible.builtin.password', molecule_password_file, length=32) }}
+    molecule_password_hash: >-
+      {{ lookup('ansible.builtin.password', molecule_password_file, length=32, encrypt='sha512_crypt') }}
+    ansible_become_password: "{{ molecule_password }}"
+    user_name: "{{ molecule_managed_user }}"
+    user_password_hash: "{{ molecule_password_hash }}"
+    user_authorized_key: "{{ molecule_public_key }}"
+
+- name: Record Phase 4 state for testinfra
+  hosts: all
+  gather_facts: false
+  vars:
+    molecule_managed_user: molecule_admin
+    molecule_password_file: "{{ molecule_ephemeral_directory }}/managed-password"
+    molecule_password: >-
+      {{ lookup('ansible.builtin.password', molecule_password_file, length=32) }}
+  tasks:
+    - name: Create private Molecule assertion state
+      ansible.builtin.file:
+        path: /root/.molecule-phase4
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Verify the managed password through sudo
+      become: true
+      become_method: ansible.builtin.sudo
+      become_user: "{{ molecule_managed_user }}"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/sudo
+          - --stdin
+          - --reset-timestamp
+          - /usr/bin/true
+        stdin: "{{ molecule_password }}"
+      changed_when: false
+      no_log: true
+
+    - name: Read the managed account password hash
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/getent
+          - shadow
+          - "{{ molecule_managed_user }}"
+      register: molecule_shadow_entry
+      changed_when: false
+      no_log: true
+
+    - name: Preserve the initial password hash for the idempotence assertion
+      ansible.builtin.copy:
+        content: "{{ molecule_shadow_entry.stdout.split(':')[1] }}\n"
+        dest: /root/.molecule-phase4/initial-password-hash
+        owner: root
+        group: root
+        mode: "0600"
+        force: false
+      no_log: true
+
+- name: Exercise the production Docker role without a container init system
+  hosts: all
+  gather_facts: true
+  vars:
+    docker_manage_service: false
+    docker_managed_user: molecule_admin
+  roles:
+    - role: docker

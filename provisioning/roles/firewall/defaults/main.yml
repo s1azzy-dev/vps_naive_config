@@ -1,0 +1,4 @@
+---
+firewall_ssh_port: 22
+firewall_docker_ipv4_template: docker-ingress-v4.rules.j2
+firewall_docker_ipv6_template: docker-ingress-v6.rules.j2

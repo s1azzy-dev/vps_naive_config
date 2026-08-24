@@ -2,4 +2,10 @@
 argument_specs:
   main:
     short_description: Validate inputs for the bootstrap role
-    options: {}
+    options:
+      bootstrap_controller_epoch:
+        type: int
+        required: true
+      bootstrap_max_clock_skew_seconds:
+        type: int
+        default: 300

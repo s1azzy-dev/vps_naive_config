@@ -1,3 +1,64 @@
 ---
-# Implemented in phase 4.
-[]
+- name: Validate the managed account inputs
+  ansible.builtin.assert:
+    that:
+      - user_password_hash is match('^\$6\$')
+      - user_authorized_key.splitlines() | length == 1
+      - user_authorized_key is match('^(ecdsa-sha2-|sk-ecdsa-sha2-|sk-ssh-ed25519|ssh-ed25519|ssh-rsa)')
+    quiet: true
+  no_log: true
+
+- name: Detect whether the managed account already exists
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/getent
+      - passwd
+      - "{{ user_name }}"
+  register: user_existing_account
+  changed_when: false
+  failed_when: user_existing_account.rc not in [0, 2]
+
+- name: Ensure the managed primary group exists
+  ansible.builtin.group:
+    name: "{{ user_name }}"
+    state: present
+
+- name: Create the managed account without rotating an existing password
+  ansible.builtin.user:
+    name: "{{ user_name }}"
+    group: "{{ user_name }}"
+    groups:
+      - sudo
+    append: false
+    create_home: true
+    home: "/home/{{ user_name }}"
+    shell: "{{ user_shell }}"
+    password: "{{ user_password_hash if user_existing_account.rc == 2 else omit }}"
+    update_password: on_create
+    state: present
+  no_log: true
+
+- name: Create the managed SSH directory
+  ansible.builtin.file:
+    path: "/home/{{ user_name }}/.ssh"
+    state: directory
+    owner: "{{ user_name }}"
+    group: "{{ user_name }}"
+    mode: "0700"
+
+- name: Install exactly the selected managed-user public key
+  ansible.posix.authorized_key:
+    user: "{{ user_name }}"
+    key: "{{ user_authorized_key }}"
+    path: "/home/{{ user_name }}/.ssh/authorized_keys"
+    manage_dir: false
+    exclusive: true
+    state: present
+
+- name: Enforce authorized keys ownership and mode
+  ansible.builtin.file:
+    path: "/home/{{ user_name }}/.ssh/authorized_keys"
+    state: file
+    owner: "{{ user_name }}"
+    group: "{{ user_name }}"
+    mode: "0600"

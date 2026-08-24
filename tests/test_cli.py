@@ -11,6 +11,7 @@ from naive_gateway_controller.cli import main
 from naive_gateway_controller.config import GatewaySettings
 from naive_gateway_controller.network import NetworkReport
 from naive_gateway_controller.preflight import PreflightMode, PreflightReport
+from naive_gateway_controller.provisioning import BootstrapOutcome
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -111,3 +112,17 @@ def test_make_init_is_private_and_never_overwrites(tmp_path: Path) -> None:
 
     assert repeated.returncode == 0, repeated.stderr
     assert config.read_text(encoding="utf-8").endswith("# preserve-me\n")
+
+
+def test_bootstrap_cli_reads_config_and_renders_skip(
+    config_factory: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli_module, "run_bootstrap", lambda _settings: BootstrapOutcome.SKIPPED)
+
+    assert main(["bootstrap", "--config", str(config_factory())]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == ("Configuration: OK\nBootstrap: SKIP (managed host already hardened)\n")
+    assert captured.err == ""

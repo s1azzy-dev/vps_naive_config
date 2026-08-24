@@ -33,6 +33,25 @@ class SSHProbeResult:
     known_host_added: bool = False
 
 
+@dataclass(frozen=True)
+class SSHAuthMethodsResult:
+    """Authentication methods offered by the server without sending a password."""
+
+    status: SSHStatus
+    offered_methods: tuple[str, ...]
+    offer_observed: bool
+
+    @property
+    def password_methods_disabled(self) -> bool:
+        """Return true only after observing that password methods were not offered."""
+        forbidden = {"password", "keyboard-interactive"}
+        return (
+            self.status is SSHStatus.AUTH_FAILED
+            and self.offer_observed
+            and forbidden.isdisjoint(self.offered_methods)
+        )
+
+
 class SSHRunner(Protocol):
     """Injectable subprocess boundary used by unit tests."""
 
@@ -174,3 +193,79 @@ def probe_ssh(
     except OSError:
         return SSHProbeResult(SSHStatus.LOCAL_ERROR)
     return SSHProbeResult(_classify_result(completed), before != after)
+
+
+def probe_ssh_auth_methods(
+    *,
+    host: str,
+    port: int,
+    user: str,
+    identity_file: Path,
+    known_hosts_file: Path,
+    ssh_binary: str = "ssh",
+    runner: SSHRunner = run_ssh,
+) -> SSHAuthMethodsResult:
+    """Inspect offered SSH auth methods without sending a key or password."""
+    if not _local_contract_is_valid(
+        host,
+        port,
+        user,
+        identity_file,
+        known_hosts_file,
+        ssh_binary,
+    ):
+        return SSHAuthMethodsResult(SSHStatus.LOCAL_ERROR, (), False)
+    command = [
+        ssh_binary,
+        "-F",
+        "/dev/null",
+        "-T",
+        "-vv",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "NumberOfPasswordPrompts=0",
+        "-o",
+        "PubkeyAuthentication=no",
+        "-o",
+        "PreferredAuthentications=password,keyboard-interactive",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={known_hosts_file}",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
+        "-o",
+        "UpdateHostKeys=no",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "ConnectionAttempts=1",
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ControlPath=none",
+        "-p",
+        str(port),
+        f"{user}@{host}",
+        "true",
+    ]
+    try:
+        completed = runner(command)
+    except OSError:
+        return SSHAuthMethodsResult(SSHStatus.LOCAL_ERROR, (), False)
+    offered: set[str] = set()
+    matches = re.findall(
+        r"Authentications that can continue:\s*([^\r\n]+)",
+        completed.stderr,
+        re.I,
+    )
+    for match in matches:
+        offered.update(method.strip().lower() for method in match.split(",") if method.strip())
+    return SSHAuthMethodsResult(
+        _classify_result(completed),
+        tuple(sorted(offered)),
+        bool(matches),
+    )

@@ -2,4 +2,35 @@
 argument_specs:
   main:
     short_description: Validate inputs for the docker role
-    options: {}
+    options:
+      docker_manage_service:
+        type: bool
+        default: true
+      docker_managed_user:
+        type: str
+        required: true
+      docker_apt_key_sha256:
+        type: str
+        required: true
+      docker_apt_key_fingerprint:
+        type: str
+        required: true
+      docker_packages:
+        type: list
+        elements: str
+        required: true
+      docker_conflicting_packages:
+        type: list
+        elements: str
+        required: true
+      docker_default_bind_ipv4:
+        type: str
+        default: 127.0.0.1
+      docker_firewall_backend:
+        type: str
+        choices:
+          - iptables
+        default: iptables
+      docker_daemon_template:
+        type: str
+        default: daemon.json.j2

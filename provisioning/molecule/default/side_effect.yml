@@ -1,0 +1,358 @@
+---
+- name: Reject an invalid SSH drop-in without changing the active configuration
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Save the valid SSH drop-in
+      ansible.builtin.copy:
+        src: /etc/ssh/sshd_config.d/00-naive-gateway-hardening.conf
+        dest: /root/.molecule-phase4/valid-ssh-drop-in
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Exercise the invalid-template boundary
+      block:
+        - name: Attempt to apply an invalid SSH template
+          ansible.builtin.include_role:
+            name: ssh
+          vars:
+            ssh_hardening_template: >-
+              {{ lookup('ansible.builtin.env', 'MOLECULE_SCENARIO_DIRECTORY') }}/molecule-invalid-ssh.conf.j2
+
+        - name: Require invalid SSH validation to fail
+          ansible.builtin.fail:
+            msg: Invalid SSH configuration unexpectedly passed validation
+      rescue:
+        - name: Compare the active drop-in with the saved valid copy
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/cmp
+              - --silent
+              - /root/.molecule-phase4/valid-ssh-drop-in
+              - /etc/ssh/sshd_config.d/00-naive-gateway-hardening.conf
+          changed_when: false
+
+        - name: Validate the still-active SSH configuration
+          ansible.builtin.command: /usr/sbin/sshd -t
+          changed_when: false
+
+        - name: Record successful rejection for testinfra
+          ansible.builtin.file:
+            path: /root/.molecule-phase4/invalid-ssh-rejected
+            state: touch
+            owner: root
+            group: root
+            mode: "0600"
+            modification_time: preserve
+            access_time: preserve
+
+- name: Refuse to overwrite an unmanaged UFW rule
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Add an unmanaged test-only UFW rule
+      community.general.ufw:
+        rule: allow
+        port: "8443"
+        proto: tcp
+
+    - name: Exercise the unmanaged-rule boundary
+      block:
+        - name: Attempt to reconcile UFW with an unmanaged rule present
+          ansible.builtin.include_role:
+            name: firewall
+
+        - name: Require unmanaged UFW rule validation to fail
+          ansible.builtin.fail:
+            msg: Unmanaged UFW rule unexpectedly passed validation
+      rescue:
+        - name: Remove the unmanaged test-only UFW rule
+          community.general.ufw:
+            rule: allow
+            port: "8443"
+            proto: tcp
+            delete: true
+
+        - name: Record successful UFW rejection for testinfra
+          ansible.builtin.file:
+            path: /root/.molecule-phase4/unmanaged-ufw-rejected
+            state: touch
+            owner: root
+            group: root
+            mode: "0600"
+            modification_time: preserve
+            access_time: preserve
+
+- name: Reject an invalid Docker ingress candidate without changing UFW
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Save the valid IPv4 UFW after-rules
+      ansible.builtin.copy:
+        src: /etc/ufw/after.rules
+        dest: /root/.molecule-phase4/valid-ufw-after.rules
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Exercise the invalid Docker ingress template boundary
+      block:
+        - name: Attempt to apply an invalid Docker ingress template
+          ansible.builtin.include_role:
+            name: firewall
+          vars:
+            firewall_docker_ipv4_template: >-
+              {{ lookup('ansible.builtin.env', 'MOLECULE_SCENARIO_DIRECTORY') }}/molecule-invalid-docker-ingress.rules.j2
+
+        - name: Require invalid Docker ingress validation to fail
+          ansible.builtin.fail:
+            msg: Invalid Docker ingress rules unexpectedly passed validation
+      rescue:
+        - name: Compare active after-rules with the saved valid copy
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/cmp
+              - --silent
+              - /root/.molecule-phase4/valid-ufw-after.rules
+              - /etc/ufw/after.rules
+          changed_when: false
+
+        - name: Require the valid Docker ingress chain to remain active
+          ansible.builtin.command:
+            argv:
+              - /usr/sbin/iptables
+              - --check
+              - DOCKER-USER
+              - --jump
+              - NAIVE-GATEWAY-DOCKER
+          changed_when: false
+
+        - name: Record successful Docker ingress rejection for testinfra
+          ansible.builtin.file:
+            path: /root/.molecule-phase4/invalid-docker-ingress-rejected
+            state: touch
+            owner: root
+            group: root
+            mode: "0600"
+            modification_time: preserve
+            access_time: preserve
+
+- name: Verify Docker adoption and firewall persistence boundaries
+  hosts: all
+  gather_facts: true
+  vars:
+    docker_manage_service: false
+    docker_managed_user: molecule_admin
+  tasks:
+    - name: Reload UFW after Docker package installation
+      community.general.ufw:
+        state: reloaded
+
+    - name: Require the managed Docker ingress jump after UFW reload
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/iptables
+          - --check
+          - DOCKER-USER
+          - --jump
+          - NAIVE-GATEWAY-DOCKER
+      changed_when: false
+
+    - name: Start the disposable Docker daemon
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/dockerd
+          - --config-file=/etc/docker/daemon.json
+          - --storage-driver=vfs
+          - --pidfile=/run/molecule-dockerd.pid
+      async: 600
+      poll: 0
+      changed_when: true
+
+    - name: Wait for the disposable Docker socket
+      ansible.builtin.wait_for:
+        path: /var/run/docker.sock
+        state: present
+        timeout: 60
+
+    - name: Require a working disposable Docker daemon
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/docker
+          - info
+      changed_when: false
+
+    - name: Create a user-defined network for default-bind validation
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/docker
+          - network
+          - create
+          - molecule-default-bind
+      changed_when: true
+
+    - name: Read the user-defined network bind default
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/docker
+          - network
+          - inspect
+          - --format
+          - >-
+            {{ '{{ index .Options "com.docker.network.bridge.host_binding_ipv4" }}' }}
+          - molecule-default-bind
+      register: molecule_docker_default_bind
+      changed_when: false
+
+    - name: Require loopback as the effective publication default
+      ansible.builtin.assert:
+        that:
+          - molecule_docker_default_bind.stdout == '127.0.0.1'
+        fail_msg: Docker did not apply the loopback publication default.
+        quiet: true
+
+    - name: Reload UFW while Docker is running
+      community.general.ufw:
+        state: reloaded
+
+    - name: Read the disposable Docker daemon pid
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/cat
+          - /run/molecule-dockerd.pid
+      register: molecule_dockerd_pid
+      changed_when: false
+
+    - name: Stop the disposable Docker daemon for restart validation
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/kill
+          - "{{ molecule_dockerd_pid.stdout }}"
+      changed_when: true
+
+    - name: Wait for the disposable Docker socket to close
+      ansible.builtin.wait_for:
+        path: /var/run/docker.sock
+        state: absent
+        timeout: 60
+
+    - name: Wait for the first Docker daemon process to exit
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/kill
+          - --signal
+          - "0"
+          - "{{ molecule_dockerd_pid.stdout }}"
+      register: molecule_dockerd_process
+      until: molecule_dockerd_process.rc != 0
+      retries: 60
+      delay: 1
+      failed_when: false
+      changed_when: false
+
+    - name: Restart the disposable Docker daemon
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/dockerd
+          - --config-file=/etc/docker/daemon.json
+          - --storage-driver=vfs
+          - --pidfile=/run/molecule-dockerd.pid
+      async: 600
+      poll: 0
+      changed_when: true
+
+    - name: Wait for Docker after restart
+      ansible.builtin.wait_for:
+        path: /var/run/docker.sock
+        state: present
+        timeout: 60
+
+    - name: Require the managed ingress jump after Docker restart
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/iptables
+          - --check
+          - DOCKER-USER
+          - --jump
+          - NAIVE-GATEWAY-DOCKER
+      changed_when: false
+
+    - name: Save the Docker management marker
+      ansible.builtin.copy:
+        src: /etc/naive-gateway/docker-managed
+        dest: /root/.molecule-phase4/docker-managed
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Remove the marker to simulate an unmanaged installation
+      ansible.builtin.file:
+        path: /etc/naive-gateway/docker-managed
+        state: absent
+
+    - name: Exercise the unmanaged Docker installation boundary
+      block:
+        - name: Attempt to adopt an existing unmarked Docker installation
+          ansible.builtin.include_role:
+            name: docker
+
+        - name: Require unmanaged Docker adoption to fail
+          ansible.builtin.fail:
+            msg: Unmanaged Docker installation unexpectedly passed validation
+      rescue:
+        - name: Restore the Docker management marker
+          ansible.builtin.copy:
+            src: /root/.molecule-phase4/docker-managed
+            dest: /etc/naive-gateway/docker-managed
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0600"
+
+        - name: Record successful unmanaged Docker rejection for testinfra
+          ansible.builtin.file:
+            path: /root/.molecule-phase4/unmanaged-docker-rejected
+            state: touch
+            owner: root
+            group: root
+            mode: "0600"
+            modification_time: preserve
+            access_time: preserve
+
+    - name: Remove the marker to exercise the firewall precondition
+      ansible.builtin.file:
+        path: /etc/naive-gateway/docker-managed
+        state: absent
+
+    - name: Exercise firewall refusal with unmanaged Docker present
+      block:
+        - name: Attempt to reconcile firewall around unmanaged Docker
+          ansible.builtin.include_role:
+            name: firewall
+
+        - name: Require unmanaged Docker firewall validation to fail
+          ansible.builtin.fail:
+            msg: Firewall unexpectedly accepted an unmanaged Docker installation
+      rescue:
+        - name: Restore the Docker management marker after firewall refusal
+          ansible.builtin.copy:
+            src: /root/.molecule-phase4/docker-managed
+            dest: /etc/naive-gateway/docker-managed
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0600"
+
+        - name: Record successful firewall refusal for testinfra
+          ansible.builtin.file:
+            path: /root/.molecule-phase4/unmanaged-docker-firewall-rejected
+            state: touch
+            owner: root
+            group: root
+            mode: "0600"
+            modification_time: preserve
+            access_time: preserve

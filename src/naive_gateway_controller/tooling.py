@@ -18,6 +18,10 @@ from naive_gateway_controller.errors import ToolingError
 EXPECTED_VERSIONS = {
     "ansible-core": "2.21.2",
     "ansible-lint": "26.6.0",
+    "molecule": "26.6.0",
+    "molecule-plugins": "26.7.15",
+    "passlib": "1.7.4",
+    "pytest-testinfra": "10.2.2",
     "uv": "0.12.5",
 }
 

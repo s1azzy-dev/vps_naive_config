@@ -1,9 +1,25 @@
 ---
 - name: Bootstrap the gateway host
-  hosts: naive_gateway
+  hosts: "{{ bootstrap_target | default('naive_gateway') }}"
   gather_facts: false
+  remote_user: "{{ bootstrap_user_name }}"
+  become: "{{ bootstrap_user_name != 'root' }}"
   roles:
     - role: bootstrap
+      when: bootstrap_apply_user
     - role: user
+      when: bootstrap_apply_user
+
+- name: Verify managed sudo before hardening SSH
+  hosts: "{{ bootstrap_target | default('naive_gateway') }}"
+  gather_facts: false
+  remote_user: "{{ user_name }}"
+  become: true
+  pre_tasks:
+    - name: Prove password-backed managed sudo before SSH changes
+      ansible.builtin.command: /usr/bin/true
+      changed_when: false
+      no_log: true
+  roles:
     - role: ssh
     - role: firewall
