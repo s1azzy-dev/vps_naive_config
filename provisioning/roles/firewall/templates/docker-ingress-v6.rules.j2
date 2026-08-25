@@ -1,0 +1,16 @@
+*filter
+:DOCKER-USER - [0:0]
+:NAIVE-GATEWAY-DOCKER - [0:0]
+-F DOCKER-USER
+-F NAIVE-GATEWAY-DOCKER
+-A DOCKER-USER -j NAIVE-GATEWAY-DOCKER
+-A DOCKER-USER -j RETURN
+-A NAIVE-GATEWAY-DOCKER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+-A NAIVE-GATEWAY-DOCKER -o docker0 -p tcp -m conntrack --ctstate NEW --ctorigdstport 80 -j RETURN
+-A NAIVE-GATEWAY-DOCKER -o docker0 -p tcp -m conntrack --ctstate NEW --ctorigdstport 443 -j RETURN
+-A NAIVE-GATEWAY-DOCKER -o br+ -p tcp -m conntrack --ctstate NEW --ctorigdstport 80 -j RETURN
+-A NAIVE-GATEWAY-DOCKER -o br+ -p tcp -m conntrack --ctstate NEW --ctorigdstport 443 -j RETURN
+-A NAIVE-GATEWAY-DOCKER -o docker0 -j DROP
+-A NAIVE-GATEWAY-DOCKER -o br+ -j DROP
+-A NAIVE-GATEWAY-DOCKER -j RETURN
+COMMIT

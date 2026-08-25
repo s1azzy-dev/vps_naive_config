@@ -1,0 +1,7 @@
+flowchart LR
+    internet["Untrusted Internet"] --> host["VPS network namespace"]
+    host --> input["UFW INPUT"]
+    host --> dnat["Docker DNAT"]
+    dnat --> thirdParty["Third-party ufw-docker policy"]
+    thirdParty --> dockerRules["Docker rules"]
+    dockerRules --> caddy["Caddy container"]

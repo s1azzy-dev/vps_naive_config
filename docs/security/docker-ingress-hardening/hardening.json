@@ -1,0 +1,221 @@
+{
+  "documentType": "codex-security.hardening-analysis",
+  "schemaVersion": "1.0",
+  "analysisId": "docker_ingress_hardening_20260824",
+  "sourceEvidence": {
+    "kind": "repository_and_primary_documentation",
+    "label": "Naive Gateway Docker ingress boundary",
+    "collectionSha256": "f68893c032ff31b404478442ce52ce59cd80832ebf16d1b04985bbb9fade2252",
+    "artifactCount": 7,
+    "targetRevision": "1c508c4c532cc395c054349611af1c2d6d30118a",
+    "sourceDrift": "present"
+  },
+  "assessment": {
+    "outcome": "opportunities_identified",
+    "summary": "Docker bridge ingress needs an explicit host-owned forwarding policy because the VPS provider offers no external firewall."
+  },
+  "constraints": {
+    "profile": "balanced",
+    "changeHorizons": ["incremental", "medium_term"],
+    "nonNegotiables": [
+      "No production VPS testing",
+      "All VPS mutations are Ansible-owned",
+      "Preserve Docker bridge networking and Caddy client addresses",
+      "Do not disable Docker firewall management"
+    ],
+    "assumptions": [
+      "No measured packet-path performance budget was supplied",
+      "The host is dedicated to this project and unmanaged Docker state must be rejected"
+    ]
+  },
+  "opportunities": [
+    {
+      "opportunityId": "docker-ingress-enforcement",
+      "title": "Enforce Docker ingress inside the VPS",
+      "summary": "Add a fail-closed policy before Docker accept rules and make accidental publications loopback-only.",
+      "diagnosis": "UFW owns host INPUT while Docker-published bridge traffic follows NAT and FORWARD, leaving no independent allowlist for future container publications.",
+      "evidence": [
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E001",
+          "path": "compose.yml",
+          "claim": "The current service intentionally publishes only TCP ports 80 and 443."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E002",
+          "path": "provisioning/roles/firewall/tasks/main.yml",
+          "claim": "The current UFW role configures host rules but no Docker forwarding hook."
+        },
+        {
+          "claimType": "inferred",
+          "sourceKind": "document",
+          "evidenceId": "E003",
+          "claim": "A future Docker publication can bypass the UFW INPUT allowlist because Docker diverts it through NAT and FORWARD."
+        }
+      ],
+      "desiredInvariants": [
+        "Only original host TCP ports 80 and 443 can reach Docker bridges from untrusted ingress.",
+        "Unqualified future Docker publications bind to loopback.",
+        "Established return traffic and container egress continue to work.",
+        "Firewall syntax and ordering are validated before public containers start."
+      ],
+      "proposalPath": "proposals/docker-ingress-enforcement.md",
+      "options": [
+        {
+          "optionId": "ufw-only",
+          "title": "Keep UFW-only enforcement",
+          "kind": "baseline",
+          "summary": "Retain current host INPUT rules without Docker forwarding enforcement.",
+          "diagramPaths": {
+            "before": "diagrams/docker-ingress-enforcement-before.mmd",
+            "after": "diagrams/docker-ingress-enforcement-ufw-only-after.mmd"
+          },
+          "evidenceCoverage": [
+            {
+              "evidenceId": "E003",
+              "effect": "unaffected",
+              "tacticalFixRequired": true,
+              "rationale": "The Docker/UFW forwarding gap remains."
+            }
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "Unexpected Docker publications remain externally reachable.", "validationPlan": "Publish an external sentinel port and scan it."},
+            {"dimension": "performance", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "No packet-path change.", "validationPlan": "Retain the current runtime smoke baseline."},
+            {"dimension": "memory", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "No new state.", "validationPlan": "No additional measurement required."},
+            {"dimension": "reliability", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "No deployment component changes.", "validationPlan": "Run existing restart smoke."},
+            {"dimension": "operability", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "No new operator contract, but exposure remains procedural.", "validationPlan": "Audit every Compose publication manually."},
+            {"dimension": "migration", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "No migration.", "validationPlan": "None."}
+          ],
+          "residualRisks": ["Any explicit Docker publication can become public."],
+          "implementationReadiness": {
+            "affectedComponents": [],
+            "workPackages": [],
+            "acceptanceCriteria": ["Not selected."],
+            "migrationNotes": [],
+            "rollback": "Not applicable."
+          }
+        },
+        {
+          "optionId": "third-party-ufw-docker",
+          "title": "Install third-party ufw-docker",
+          "kind": "incremental",
+          "summary": "Use the upstream script and UFW forwarding integration.",
+          "diagramPaths": {
+            "before": "diagrams/docker-ingress-enforcement-before.mmd",
+            "after": "diagrams/docker-ingress-enforcement-ufw-docker-after.mmd"
+          },
+          "evidenceCoverage": [
+            {"evidenceId": "E003", "effect": "addresses", "tacticalFixRequired": true, "rationale": "It hooks Docker forwarding but requires a pinned privileged dependency."},
+            {"evidenceId": "E007", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Its generic policy must be narrowed and audited for this host."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "medium", "basis": "source-derived", "assessment": "Docker ingress becomes UFW-controlled, with broader generic behavior than required.", "validationPlan": "Audit installed after-rules and run sentinel scans."},
+            {"dimension": "performance", "direction": "neutral", "confidence": "low", "basis": "hypothetical", "assessment": "Kernel-only forwarding rules should add little overhead.", "validationPlan": "Compare CONNECT throughput and latency."},
+            {"dimension": "memory", "direction": "neutral", "confidence": "medium", "basis": "source-derived", "assessment": "No resident proxy is added.", "validationPlan": "Inspect process and rule counts."},
+            {"dimension": "reliability", "direction": "unknown", "confidence": "medium", "basis": "source-derived", "assessment": "Lifecycle depends on the external installer and reload service.", "validationPlan": "Exercise UFW/Docker restart and reboot."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Adds a privileged external tool and upgrade path.", "validationPlan": "Document pinning, audit and rollback."},
+            {"dimension": "migration", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "Existing UFW files must be adopted by the installer.", "validationPlan": "Test install/uninstall on every supported OS."}
+          ],
+          "residualRisks": ["Generic subnet exceptions or dependency drift can widen policy."],
+          "implementationReadiness": {
+            "affectedComponents": ["provisioning/roles/firewall"],
+            "workPackages": ["Pin and audit ufw-docker", "Manage install and rollback"],
+            "acceptanceCriteria": ["Sentinel port is externally blocked."],
+            "migrationNotes": ["Not selected."],
+            "rollback": "Run the pinned uninstall path after stopping public containers."
+          }
+        },
+        {
+          "optionId": "localhost-host-proxy",
+          "title": "Use loopback publication behind a host TCP proxy",
+          "kind": "isolation",
+          "summary": "Terminate public host sockets outside Docker and proxy bytes to loopback mappings.",
+          "diagramPaths": {
+            "before": "diagrams/docker-ingress-enforcement-before.mmd",
+            "after": "diagrams/docker-ingress-enforcement-localhost-proxy-after.mmd"
+          },
+          "evidenceCoverage": [
+            {"evidenceId": "E003", "effect": "addresses", "tacticalFixRequired": false, "rationale": "Public traffic stays on the UFW INPUT path."},
+            {"evidenceId": "E005", "effect": "addresses", "tacticalFixRequired": true, "rationale": "All container mappings must remain loopback-only."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "UFW INPUT becomes the only public ingress boundary.", "validationPlan": "Verify no Docker mapping binds a public address."},
+            {"dimension": "performance", "direction": "regresses", "confidence": "medium", "basis": "hypothetical", "assessment": "Every connection gains a userspace proxy hop.", "validationPlan": "Measure CONNECT latency and throughput."},
+            {"dimension": "memory", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Adds a proxy process and buffers.", "validationPlan": "Measure proxy RSS under load."},
+            {"dimension": "reliability", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "The proxy becomes an additional availability dependency.", "validationPlan": "Exercise crash, restart and backpressure."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Adds units, logs and health checks; source IP preservation needs protocol work.", "validationPlan": "Validate diagnostics and client-address behavior."},
+            {"dimension": "migration", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Public listeners and health contracts move to a new component.", "validationPlan": "Stage a reversible cutover on a disposable host."}
+          ],
+          "residualRisks": ["Proxy failure affects all public traffic", "Client source identity may be lost."],
+          "implementationReadiness": {
+            "affectedComponents": ["compose.yml", "provisioning/roles/naive_gateway"],
+            "workPackages": ["Deploy host proxy", "Move mappings to loopback", "Add proxy health checks"],
+            "acceptanceCriteria": ["Only host proxy sockets are public."],
+            "migrationNotes": ["Deferred fallback."],
+            "rollback": "Stop proxy and restore reviewed Docker public mappings with forwarding policy in place."
+          }
+        },
+        {
+          "optionId": "native-docker-user",
+          "title": "Own a native DOCKER-USER policy",
+          "kind": "structural",
+          "summary": "Use validated Ansible-owned forwarding rules and loopback-safe Docker defaults.",
+          "diagramPaths": {
+            "before": "diagrams/docker-ingress-enforcement-before.mmd",
+            "after": "diagrams/docker-ingress-enforcement-native-docker-user-after.mmd"
+          },
+          "evidenceCoverage": [
+            {"evidenceId": "E001", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Preserves intentional 80/443 while adding an independent allowlist."},
+            {"evidenceId": "E003", "effect": "addresses", "tacticalFixRequired": false, "rationale": "Enforces policy on Docker's forwarding path."},
+            {"evidenceId": "E004", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Uses the supported hook and original-port conntrack matching."},
+            {"evidenceId": "E005", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Adds a loopback default and explicit Caddy exceptions."},
+            {"evidenceId": "E006", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Pins the iptables backend and defers nftables migration."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "Unexpected Docker bridge ingress fails closed at a supported pre-accept hook.", "validationPlan": "Run original-port sentinel scans for IPv4/IPv6."},
+            {"dimension": "performance", "direction": "unknown", "confidence": "medium", "basis": "hypothetical", "assessment": "New flows perform a short chain and conntrack original-port match without a userspace hop.", "validationPlan": "Compare CONNECT latency and sustained throughput."},
+            {"dimension": "memory", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "Only bounded kernel rule state is added.", "validationPlan": "Compare rule and conntrack state under the same load."},
+            {"dimension": "reliability", "direction": "improves", "confidence": "medium", "basis": "source-derived", "assessment": "The application path is unchanged and policy is loaded before Docker, but backend ordering must survive restart/reboot.", "validationPlan": "Test UFW reload, Docker restart and reboot."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "Operators must inspect both UFW INPUT and the named Docker chain.", "validationPlan": "Add one verify command and recovery documentation."},
+            {"dimension": "migration", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "Unmanaged Docker or firewall state must be rejected and explicitly adopted.", "validationPlan": "Exercise clean, partial and unmanaged-host scenarios."}
+          ],
+          "residualRisks": [
+            "Host root or Docker daemon compromise can rewrite the policy.",
+            "Prohibited networking modes bypass the bridge hook.",
+            "A future native nftables backend requires a new policy design."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "provisioning/roles/firewall",
+              "provisioning/roles/docker",
+              "provisioning/molecule/default",
+              "compose.yml",
+              "tests/test_repository.py"
+            ],
+            "workPackages": [
+              "Add validated Docker ingress UFW blocks",
+              "Implement safe Docker installation and daemon defaults",
+              "Add policy persistence and exposure tests",
+              "Make Caddy public mappings explicit"
+            ],
+            "acceptanceCriteria": [
+              "Only original host TCP 80/443 can reach Docker bridges externally.",
+              "Sentinel public mapping is externally blocked after reload, restart and reboot."
+            ],
+            "migrationNotes": ["Reject unmanaged Docker/firewall state."],
+            "rollback": "Stop public containers before removing managed forwarding rules or daemon defaults."
+          }
+        }
+      ],
+      "recommendedOptionId": "native-docker-user",
+      "recommendation": "Use native DOCKER-USER enforcement with loopback-safe defaults under the current single-host constraints."
+    }
+  ],
+  "openQuestions": [
+    "Validate IPv6 behavior on every supported disposable OS image.",
+    "Measure conntrack original-port matching under the gateway workload."
+  ]
+}

@@ -1,0 +1,8 @@
+flowchart LR
+    internet["Untrusted Internet"] --> host["VPS network namespace"]
+    host --> input["UFW INPUT"]
+    input --> ssh["sshd"]
+    host --> dnat["Docker DNAT"]
+    dnat --> dockerRules["Docker accept rules"]
+    dockerRules --> caddy["Caddy container"]
+    dockerRules --> future["Any future published container port"]

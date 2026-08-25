@@ -1,3 +1,48 @@
 ---
-# Implemented in phase 4.
-[]
+- name: Probe Python and sudo bootstrap prerequisites
+  ansible.builtin.raw: test -x /usr/bin/python3 && test -x /usr/bin/sudo
+  register: bootstrap_prerequisites
+  changed_when: false
+  failed_when: false
+
+- name: Install Python and sudo on a minimal apt-based host
+  ansible.builtin.raw: >-
+    apt-get update &&
+    DEBIAN_FRONTEND=noninteractive
+    apt-get install --yes --no-install-recommends python3 sudo
+  when: bootstrap_prerequisites.rc != 0
+  changed_when: true
+
+- name: Gather facts after Python bootstrap
+  ansible.builtin.setup:
+
+- name: Require a supported Debian or Ubuntu release
+  ansible.builtin.assert:
+    that:
+      - >-
+        (ansible_facts.distribution == 'Debian' and
+        ansible_facts.distribution_major_version in ['12', '13']) or
+        (ansible_facts.distribution == 'Ubuntu' and
+        ansible_facts.distribution_version in ['22.04', '24.04', '26.04'])
+    fail_msg: >-
+      Unsupported operating system: {{ ansible_facts.distribution }}
+      {{ ansible_facts.distribution_version }}
+    quiet: true
+
+- name: Require a supported CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.architecture in ['x86_64', 'aarch64']
+    fail_msg: "Unsupported architecture: {{ ansible_facts.architecture }}"
+    quiet: true
+
+- name: Require controller and VPS clocks to be close
+  ansible.builtin.assert:
+    that:
+      - >-
+        ((ansible_facts.date_time.epoch | int) - bootstrap_controller_epoch) |
+        abs <= bootstrap_max_clock_skew_seconds
+    fail_msg: >-
+      VPS clock differs from the controller by more than
+      {{ bootstrap_max_clock_skew_seconds }} seconds.
+    quiet: true

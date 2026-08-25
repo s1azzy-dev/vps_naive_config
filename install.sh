@@ -8,7 +8,7 @@ cd "$ROOT_DIR"
 log() { printf '\n==> %s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-[[ ${EUID:-$(id -u)} -eq 0 ]] || die "run as root: sudo DOMAIN=example.com ACME_EMAIL=you@example.com ./install.sh"
+[[ ${EUID:-$(id -u)} -eq 0 ]] || die "fill .env manually, then run as root: sudo ./install.sh"
 [[ -r /etc/os-release ]] || die "cannot identify the operating system"
 
 # shellcheck source=/etc/os-release
@@ -19,21 +19,16 @@ case "${ID:-}:${VERSION_ID:-}" in
   *) die "supported systems: Ubuntu 22.04+ and Debian 12+ (found ${ID:-unknown} ${VERSION_ID:-unknown})" ;;
 esac
 
-INPUT_DOMAIN=${DOMAIN:-}
-INPUT_EMAIL=${ACME_EMAIL:-}
-INPUT_USER=${NAIVE_USER:-}
-INPUT_PASSWORD=${NAIVE_PASSWORD:-}
-
 env_value() {
   local key=$1 file=$2
   [[ -f "$file" ]] || return 0
   awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$file"
 }
 
-DOMAIN=${INPUT_DOMAIN:-$(env_value DOMAIN .env)}
-ACME_EMAIL=${INPUT_EMAIL:-$(env_value ACME_EMAIL .env)}
-NAIVE_USER=${INPUT_USER:-$(env_value NAIVE_USER .env)}
-NAIVE_PASSWORD=${INPUT_PASSWORD:-$(env_value NAIVE_PASSWORD .env)}
+DOMAIN=$(env_value DOMAIN .env)
+ACME_EMAIL=$(env_value ACME_EMAIL .env)
+NAIVE_USER=$(env_value NAIVE_USER .env)
+NAIVE_PASSWORD=$(env_value NAIVE_PASSWORD .env)
 
 [[ -n $DOMAIN ]] || die "DOMAIN is required"
 [[ -n $ACME_EMAIL ]] || die "ACME_EMAIL is required"
@@ -48,23 +43,11 @@ install_packages() {
   apt-get install -y --no-install-recommends ca-certificates curl dnsutils file gnupg openssl xz-utils
 }
 
-install_docker() {
-  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    log "Docker Engine and Compose plugin already present"
-    return
-  fi
-
-  log "Installing Docker Engine from Docker's signed apt repository"
-  install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL "https://download.docker.com/linux/${ID}/gpg" -o /etc/apt/keyrings/docker.asc
-  chmod a+r /etc/apt/keyrings/docker.asc
-  local codename=${VERSION_CODENAME:-}
-  [[ -n $codename ]] || die "VERSION_CODENAME is missing from /etc/os-release"
-  printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/%s %s stable\n' \
-    "$(dpkg --print-architecture)" "$ID" "$codename" > /etc/apt/sources.list.d/docker.list
-  apt-get update
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-  systemctl enable --now docker
+require_docker() {
+  log "Checking the Ansible-managed Docker prerequisite"
+  command -v docker >/dev/null 2>&1 || die "Docker is missing; provision it with the Ansible docker role"
+  docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is missing; provision it with Ansible"
+  [[ -f /etc/naive-gateway/docker-managed ]] || die "Docker is not marked as managed by this project"
 }
 
 public_ipv4() {
@@ -120,18 +103,15 @@ write_env() {
 
 firewall_notice() {
   log "Firewall notice"
-  printf '%s\n' 'Required inbound ports: 22/tcp, 80/tcp, 443/tcp; 443/udp is optional for the ordinary HTTP/3 website.'
+  printf '%s\n' 'Required inbound ports: configured SSH/tcp, 80/tcp and 443/tcp; 443/udp stays closed.'
   if command -v ufw >/dev/null 2>&1; then
     printf 'UFW detected (%s). It was not modified.\n' "$(ufw status 2>/dev/null | head -n1 || true)"
   fi
-  if command -v nft >/dev/null 2>&1; then
-    printf 'nftables detected. Existing rules were not modified.\n'
-  fi
-  printf '%s\n' 'Open these ports in the provider firewall and the host firewall before continuing.'
+  printf '%s\n' 'Ansible must own the UFW and DOCKER-USER policies before this transitional deploy runs.'
 }
 
 install_packages
-install_docker
+require_docker
 check_dns
 write_env
 firewall_notice

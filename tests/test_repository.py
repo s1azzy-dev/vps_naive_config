@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,34 @@ def test_reproducible_version_pins() -> None:
         for path in ("Dockerfile", "compose.yml", "versions.env")
     )
     assert re.search(r"(^|[^A-Za-z])latest([^A-Za-z]|$)", production, re.I) is None
+
+
+def test_phase4_test_dependencies_and_image_are_pinned() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    development = set(project["dependency-groups"]["dev"])
+    assert {
+        "molecule==26.6.0",
+        "molecule-plugins[docker]==26.7.15",
+        "pytest-testinfra==10.2.2",
+    } <= development
+    assert "passlib==1.7.4" in project["project"]["dependencies"]
+
+    requirements = yaml.safe_load(
+        (ROOT / "provisioning/requirements.yml").read_text(encoding="utf-8"),
+    )
+    assert requirements["collections"] == [
+        {"name": "ansible.posix", "version": "2.2.0"},
+        {"name": "community.general", "version": "13.3.0"},
+        {"name": "community.docker", "version": "5.2.1"},
+        {"name": "community.library_inventory_filtering_v1", "version": "1.1.5"},
+    ]
+    dockerfile = (ROOT / "provisioning/molecule/default/Dockerfile.j2").read_text(
+        encoding="utf-8",
+    )
+    assert (
+        "debian:12-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241"
+        in dockerfile
+    )
 
 
 def test_believable_same_origin_static_site() -> None:
@@ -61,6 +90,8 @@ def _ansible_secret_violations(directory: Path) -> list[str]:
         "ansible_password",
         "become_pass",
         "naive_password",
+        "user_password",
+        "user_password_hash",
     }
     for path in (*directory.rglob("*.yml"), *directory.rglob("*.yaml")):
         content = path.read_text(encoding="utf-8")
@@ -118,14 +149,62 @@ def test_role_argument_specs_exist_and_are_valid() -> None:
             continue
         spec_path = role / "meta/argument_specs.yml"
         data = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
-        assert data == {
-            "argument_specs": {
-                "main": {
-                    "short_description": f"Validate inputs for the {role.name} role",
-                    "options": {},
-                },
-            },
-        }
+        main = data["argument_specs"]["main"]
+        assert main["short_description"] == f"Validate inputs for the {role.name} role"
+        assert isinstance(main["options"], dict)
+
+
+def test_phase6_docker_role_contract_is_pinned_and_fail_closed() -> None:
+    defaults = yaml.safe_load(
+        (ROOT / "provisioning/roles/docker/defaults/main.yml").read_text(encoding="utf-8"),
+    )
+    assert defaults["docker_apt_key_sha256"] == (
+        "1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570"
+    )
+    assert defaults["docker_apt_key_fingerprint"] == ("9DC858229FC7DD38854AE2D88D81803C0EBFCD88")
+    assert defaults["docker_packages"] == [
+        "docker-ce",
+        "docker-ce-cli",
+        "containerd.io",
+        "docker-buildx-plugin",
+        "docker-compose-plugin",
+    ]
+    assert defaults["docker_manage_service"] is True
+    assert defaults["docker_default_bind_ipv4"] == "127.0.0.1"
+    assert defaults["docker_firewall_backend"] == "iptables"
+
+    tasks = (ROOT / "provisioning/roles/docker/tasks/main.yml").read_text(encoding="utf-8")
+    assert "Refuse to adopt an unmanaged Docker installation" in tasks
+    assert "Validate the Docker daemon candidate" in tasks
+    assert tasks.index("Require the prepared Docker ingress policy") < tasks.index(
+        "Install Docker Engine and Compose v2",
+    )
+
+
+def test_docker_publication_boundary_is_explicit() -> None:
+    compose = yaml.safe_load((ROOT / "compose.yml").read_text(encoding="utf-8"))
+    service = compose["services"]["caddy"]
+    assert service["ports"] == [
+        "0.0.0.0:80:80/tcp",
+        "0.0.0.0:443:443/tcp",
+    ]
+    assert "network_mode" not in service
+    assert all("/var/run/docker.sock" not in volume for volume in service["volumes"])
+    assert all("/run/docker.sock" not in volume for volume in service["volumes"])
+
+    for network in compose.get("networks", {}).values():
+        assert network.get("driver", "bridge") not in {"host", "macvlan", "ipvlan"}
+
+
+def test_transitional_installer_no_longer_mutates_docker_installation() -> None:
+    installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+    assert "install_docker" not in installer
+    assert "download.docker.com" not in installer
+    assert "apt-get install -y docker-ce" not in installer
+    assert "require_docker" in installer
+    assert "/etc/naive-gateway/docker-managed" in installer
+    assert "INPUT_DOMAIN" not in installer
+    assert "INPUT_PASSWORD" not in installer
 
 
 def test_replaced_controller_shell_files_are_absent() -> None:
@@ -155,6 +234,7 @@ def test_make_does_not_import_or_export_dotenv_values() -> None:
     assert "export VPS_" not in makefile
     assert '"$(CONTROLLER)" check-config --config "$(CONFIG_FILE)"' in makefile
     assert '"$(CONTROLLER)" preflight --config "$(CONFIG_FILE)"' in makefile
+    assert '"$(CONTROLLER)" bootstrap --config "$(CONFIG_FILE)"' in makefile
 
 
 def test_ci_workflow_covers_every_quality_layer() -> None:
@@ -170,7 +250,7 @@ def test_ci_workflow_covers_every_quality_layer() -> None:
     assert "make preflight" not in workflow_text
 
     jobs = workflow["jobs"]
-    assert set(jobs) == {"quality", "tests", "runtime-smoke"}
+    assert set(jobs) == {"quality", "tests", "molecule", "runtime-smoke"}
     for job in jobs.values():
         assert job["runs-on"] == "ubuntu-24.04"
         assert int(job["timeout-minutes"]) <= 20
@@ -193,6 +273,10 @@ def test_ci_workflow_covers_every_quality_layer() -> None:
     assert "make tooling" in test_commands
     assert "make test" in test_commands
 
+    molecule_commands = "\n".join(step.get("run", "") for step in jobs["molecule"]["steps"])
+    assert "make tooling" in molecule_commands
+    assert "make molecule" in molecule_commands
+
     runtime_job = jobs["runtime-smoke"]
     assert "CI_ENV_FILE" not in runtime_job.get("env", {})
     runtime_steps = runtime_job["steps"]
@@ -206,8 +290,8 @@ def test_ci_workflow_covers_every_quality_layer() -> None:
     for expected in ("compose.yml build", "caddy validate", "caddy list-modules", "smoke-local.sh"):
         assert expected in runtime_commands
 
-    assert workflow_text.count("persist-credentials: false") == 3
-    assert workflow_text.count("cache-local-path: .ansible/uv-cache") == 2
+    assert workflow_text.count("persist-credentials: false") == 4
+    assert workflow_text.count("cache-local-path: .ansible/uv-cache") == 3
 
 
 def test_remaining_shell_syntax() -> None:

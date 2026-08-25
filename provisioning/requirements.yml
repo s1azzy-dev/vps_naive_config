@@ -1,3 +1,12 @@
 ---
-# Collections are added only in the phase that introduces their first module.
-collections: []
+# Production roles use ansible.posix.authorized_key and community.general.ufw.
+# community.docker powers the pinned Molecule Docker driver.
+collections:
+  - name: ansible.posix
+    version: 2.2.0
+  - name: community.general
+    version: 13.3.0
+  - name: community.docker
+    version: 5.2.1
+  - name: community.library_inventory_filtering_v1
+    version: 1.1.5

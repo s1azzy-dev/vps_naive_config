@@ -1,0 +1,5 @@
+flowchart LR
+    internet["Untrusted Internet"] --> input["UFW INPUT"]
+    input --> proxy["Host TCP proxy on 80/443"]
+    proxy --> loopback["Docker loopback publication"]
+    loopback --> caddy["Caddy container"]

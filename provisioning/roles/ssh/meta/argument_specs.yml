@@ -2,4 +2,7 @@
 argument_specs:
   main:
     short_description: Validate inputs for the ssh role
-    options: {}
+    options:
+      ssh_hardening_template:
+        type: str
+        default: ssh-hardening.conf.j2

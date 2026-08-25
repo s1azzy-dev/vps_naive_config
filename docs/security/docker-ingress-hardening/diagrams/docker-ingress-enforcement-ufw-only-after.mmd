@@ -1,0 +1,7 @@
+flowchart LR
+    internet["Untrusted Internet"] --> host["VPS network namespace"]
+    host --> input["UFW INPUT allowlist"]
+    input --> ssh["sshd"]
+    host --> dnat["Docker DNAT bypasses UFW INPUT"]
+    dnat --> dockerRules["Docker accept rules"]
+    dockerRules --> published["All explicitly published container ports"]

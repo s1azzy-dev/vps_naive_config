@@ -1,0 +1,40 @@
+---
+ansible:
+  env:
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/roles"
+driver:
+  name: docker
+platforms:
+  - name: phase5-debian12
+    # Molecule uses this value only to derive a valid local image tag; the
+    # actual base image is pinned by digest in Dockerfile.j2.
+    image: debian:12-slim
+    dockerfile: Dockerfile.j2
+    pre_build_image: false
+    override_command: false
+    command: /usr/sbin/sshd -D -e
+    privileged: true
+    capabilities:
+      - NET_ADMIN
+    tty: true
+provisioner:
+  name: ansible
+  inventory:
+    host_vars:
+      phase5-debian12:
+        ansible_python_interpreter: /usr/bin/python3
+verifier:
+  name: testinfra
+  directory: tests
+  options:
+    verbose: true
+scenario:
+  test_sequence:
+    - destroy
+    - syntax
+    - create
+    - converge
+    - idempotence
+    - side_effect
+    - verify
+    - destroy

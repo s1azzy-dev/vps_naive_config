@@ -1,0 +1,2 @@
+---
+ssh_hardening_template: ssh-hardening.conf.j2

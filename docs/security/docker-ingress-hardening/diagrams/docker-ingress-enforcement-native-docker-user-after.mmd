@@ -1,0 +1,9 @@
+flowchart LR
+    internet["Untrusted Internet"] --> host["VPS network namespace"]
+    host --> input["UFW INPUT"]
+    input --> ssh["sshd"]
+    host --> dnat["Docker DNAT"]
+    dnat --> policy["Ansible-owned DOCKER-USER policy"]
+    policy -->|"original TCP 80/443"| dockerRules["Docker rules"]
+    policy -->|"all other Docker ingress"| drop["DROP"]
+    dockerRules --> caddy["Caddy container"]

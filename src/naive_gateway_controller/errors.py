@@ -13,5 +13,9 @@ class PreflightError(ControllerError):
     """A read-only DNS, TCP, or SSH preflight check failed."""
 
 
+class ProvisioningError(ControllerError):
+    """A provisioning safety check or Ansible execution failed."""
+
+
 class ToolingError(ControllerError):
     """Controller tooling is missing or inconsistent."""

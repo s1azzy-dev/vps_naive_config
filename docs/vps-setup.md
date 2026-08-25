@@ -165,55 +165,48 @@ dig +short A proxy.example.com
 
 ## 6. Настройте firewall
 
-В firewall панели VPS-провайдера разрешите входящие подключения:
+Если панель VPS-провайдера умеет фильтровать ingress, зеркально разрешите только:
 
 - `22/tcp` — SSH;
 - `80/tcp` — выпуск и обновление TLS-сертификата;
-- `443/tcp` — HTTPS и Naive;
-- `443/udp` — необязательно, только для HTTP/3 публичного сайта.
+- `443/tcp` — HTTPS и Naive.
 
-Если у вас постоянный внешний IP, ограничьте `22/tcp` этим адресом в панели провайдера.
+`443/udp` не открывайте: текущая конфигурация использует только HTTP/1.1 и HTTP/2.
 
-Затем в сессии `slazzy` настройте UFW:
+Если такой панели нет, это не блокирует выбранную архитектуру: обязательная
+граница находится внутри VPS и управляется Ansible. UFW защищает host INPUT, а
+Ansible-owned `DOCKER-USER` policy отдельно защищает Docker FORWARD. Она сверяет
+original host port до Docker accept rules, поэтому случайный mapping вроде
+`0.0.0.0:18080:443` не получает разрешение порта 443.
+
+Не собирайте эти rules вручную. На controller заполните `.env` вручную, не
+передавая значения через CLI, затем выполните локальные проверки:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y ufw
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw limit 22/tcp
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
-sudo ufw allow 443/udp
-sudo ufw enable
-sudo ufw status verbose
+cp .env.example .env
+chmod 600 .env
+# заполните .env в редакторе
+make tooling
+make check-config
+make preflight
 ```
 
-Установщик firewall не изменяет.
+`make bootstrap` изменяет VPS и поэтому запускается только когда вы готовы к
+provisioning. Он создаёт пользователя и sudo, проверяет новое SSH-соединение,
+hardens SSH, затем применяет UFW и валидированную Docker ingress policy. Не
+закрывайте исходную root-сессию до отдельного reconnect. Полный lockout/firewall
+gate сначала должен пройти на disposable VM/VPS.
 
 ## 7. Установите Naive Gateway
 
-Все следующие команды выполняйте в SSH-сессии пользователя `slazzy`:
+На текущем этапе автоматизация production deployment ещё не завершена: локально
+реализованы bootstrap/firewall/Docker roles, а gateway role и controller command
+будут закончены в фазах 7–8. Не запускайте эту ветку на настроенном production VPS.
 
-```bash
-cd ~
-sudo apt-get update
-sudo apt-get install -y git make
-git clone https://github.com/s1azzy-dev/vps_naive_config.git
-cd vps_naive_config
-sudo DOMAIN=proxy.example.com ACME_EMAIL=admin@example.com ./install.sh
-```
-
-Замените домен и email своими значениями. Установщик:
-
-1. установит диагностические утилиты и Docker Engine с Compose;
-2. сверит публичный IPv4 VPS с `A`-записью;
-3. создаст `.env` со случайными учётными данными;
-4. соберёт закреплённый образ Caddy с модулем `forwardproxy`;
-5. проверит конфигурацию, запустит контейнер и дождётся публичного TLS;
-6. проверит сайт, HTTP/2, защиту от простого обнаружения proxy и авторизованный CONNECT.
-
-Сохраните выведенные endpoint, имя пользователя и пароль. Они также находятся в root-доступном файле `.env` с правами `600`.
+Переходный `install.sh` больше не устанавливает Docker и отказывается работать
+без `/etc/naive-gateway/docker-managed`. Он оставлен только для миграционного
+периода после Ansible-подготовки clean/disposable host. Все значения `.env`
+заполняются пользователем вручную; передача секретов через CLI не требуется.
 
 Не добавляйте `slazzy` в группу `docker`: доступ к Docker socket фактически равен root-доступу. Не настраивайте `NOPASSWD` для `sudo`; запускайте административные команды явно через `sudo`.
 
@@ -236,7 +229,9 @@ sudo ss -lntup | grep -E ':80|:443'
 dig +short A proxy.example.com
 ```
 
-Частые причины: DNS ещё не обновился, `80/tcp` или `443/tcp` закрыт у провайдера, эти порты заняты другим сервисом, либо существует неверная `AAAA`-запись.
+Частые причины: DNS ещё не обновился, `80/tcp` или `443/tcp` блокируется внешней
+сетью/host policy, эти порты заняты другим сервисом либо существует неверная
+`AAAA`-запись.
 
 ## 9. Обслуживайте установку
 
@@ -262,7 +257,10 @@ sudo make update
 
 Перед обновлением рабочее дерево должно быть без локальных изменений. Версии зависимостей меняются только явным коммитом в `versions.env`.
 
-Для переноса на другой VPS повторите шаги 1–7, восстановите `.env` из защищённой копии, переключите DNS и запустите `sudo ./install.sh`. Старый VPS выключайте только после успешного `sudo make check` на новом адресе.
+Для переноса на другой VPS используйте disposable-first Ansible workflow из
+актуального provisioning-плана, восстановите `.env` из защищённой копии и только
+после external acceptance переключайте DNS. Старый VPS выключайте после
+успешного `make check` на новом адресе.
 
 ## Справочная документация
 

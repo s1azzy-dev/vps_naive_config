@@ -9,6 +9,7 @@ description = "Typed local controller for Naive Gateway provisioning"
 requires-python = ">=3.12,<3.15"
 dependencies = [
   "dnspython==2.8.0",
+  "passlib==1.7.4",
   "pydantic-settings==2.15.0",
 ]
 
@@ -19,8 +20,11 @@ gateway-controller = "naive_gateway_controller.cli:main"
 dev = [
   "ansible-core==2.21.2",
   "ansible-lint==26.6.0",
+  "molecule==26.6.0",
+  "molecule-plugins[docker]==26.7.15",
   "mypy==2.3.0",
   "pytest==9.1.1",
+  "pytest-testinfra==10.2.2",
   "ruff==0.16.2",
   "uv==0.12.5",
 ]
@@ -49,6 +53,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101", "S105"]
+"provisioning/molecule/**/tests/**/*.py" = ["S101"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -57,5 +62,5 @@ files = ["src"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["yaml"]
+module = ["passlib", "passlib.*", "yaml"]
 ignore_missing_imports = true

@@ -2,4 +2,13 @@
 argument_specs:
   main:
     short_description: Validate inputs for the firewall role
-    options: {}
+    options:
+      firewall_ssh_port:
+        type: int
+        default: 22
+      firewall_docker_ipv4_template:
+        type: str
+        default: docker-ingress-v4.rules.j2
+      firewall_docker_ipv6_template:
+        type: str
+        default: docker-ingress-v6.rules.j2
