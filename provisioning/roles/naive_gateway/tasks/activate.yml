@@ -1,0 +1,145 @@
+---
+- name: Derive the candidate Compose command
+  ansible.builtin.set_fact:
+    naive_gateway_compose_command:
+      - /usr/bin/docker
+      - compose
+      - --project-name
+      - naive-gateway
+      - --project-directory
+      - "{{ naive_gateway_release }}"
+      - --env-file
+      - "{{ naive_gateway_release }}/versions.env"
+      - --env-file
+      - "{{ naive_gateway_config_dir }}/gateway.env.pending"
+      - -f
+      - "{{ naive_gateway_release }}/compose.yml"
+      - -f
+      - "{{ naive_gateway_release }}/deployment.yml"
+
+- name: Validate the candidate and activate only after all configuration checks
+  block:
+    - name: Resolve the candidate Compose configuration privately
+      ansible.builtin.command:
+        argv: "{{ naive_gateway_compose_command + ['config', '--format', 'json'] }}"
+      register: naive_gateway_compose_config
+      changed_when: false
+      no_log: true
+
+    - name: Enforce the supported gateway container boundary
+      ansible.builtin.assert:
+        that:
+          - naive_gateway_resolved.services.keys() | list == ['caddy']
+          - naive_gateway_service.get('network_mode', '') == ''
+          - not naive_gateway_service.get('privileged', false)
+          - naive_gateway_service.get('cap_add', []) | length == 0
+          - naive_gateway_service.get('devices', []) | length == 0
+          - naive_gateway_service.ports | length == 2
+          - naive_gateway_service.ports | map(attribute='host_ip') | unique | list == ['0.0.0.0']
+          - naive_gateway_service.ports | map(attribute='protocol') | unique | list == ['tcp']
+          - naive_gateway_service.ports | map(attribute='published') | map('string') | sort == ['443', '80']
+          - naive_gateway_service.ports | map(attribute='target') | map('int') | sort == [80, 443]
+          - >-
+            naive_gateway_service.volumes | selectattr('type', 'equalto', 'bind') | map(attribute='source') | sort ==
+            [naive_gateway_release + '/Caddyfile', naive_gateway_release + '/site']
+          - naive_gateway_service.volumes | selectattr('type', 'equalto', 'bind') | rejectattr('read_only') | list | length == 0
+          - naive_gateway_resolved.networks.keys() | list == ['default']
+          - naive_gateway_resolved.networks.default.get('driver', 'bridge') == 'bridge'
+          - not naive_gateway_resolved.networks.default.get('external', false)
+          - naive_gateway_resolved.networks.default.get('driver_opts', {}) | length == 0
+          - naive_gateway_resolved.volumes.keys() | sort == ['caddy_config', 'caddy_data']
+          - naive_gateway_resolved.volumes.values() | selectattr('external', 'defined') | selectattr('external') | list | length == 0
+          - naive_gateway_resolved.volumes.values() | selectattr('driver_opts', 'defined') | list | length == 0
+          - naive_gateway_service.volumes | length == 4
+        quiet: true
+      vars:
+        naive_gateway_resolved: "{{ naive_gateway_compose_config.stdout | from_json }}"
+        naive_gateway_service: "{{ naive_gateway_resolved.services.caddy }}"
+      no_log: true
+
+    - name: Inspect the release image
+      ansible.builtin.command:
+        argv: [/usr/bin/docker, image, inspect, --format, '{{ "{{.Id}}" }}', "{{ naive_gateway_image }}"]
+      register: naive_gateway_image_info
+      changed_when: false
+      failed_when: false
+
+    - name: Build the pinned release image before container replacement
+      ansible.builtin.command:
+        argv: "{{ naive_gateway_compose_command + ['build', 'caddy'] }}"
+      changed_when: true
+      no_log: true
+      when: naive_gateway_image_info.rc != 0
+
+    - name: Validate Caddy without mounting production certificate volumes
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/usr/bin/docker', 'run', '--rm', '--network', 'none',
+              '--env-file', naive_gateway_config_dir + '/gateway.env.pending',
+              '--mount', 'type=bind,src=' + naive_gateway_release + '/Caddyfile,dst=/etc/caddy/Caddyfile,readonly',
+              naive_gateway_image, 'caddy', 'validate', '--config', '/etc/caddy/Caddyfile', '--adapter', 'caddyfile'] }}
+      changed_when: false
+      no_log: true
+
+    - name: Activate the validated runtime configuration atomically
+      ansible.builtin.copy:
+        src: "{{ naive_gateway_config_dir }}/gateway.env.pending"
+        dest: "{{ naive_gateway_config_dir }}/gateway.env"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Start the validated release and wait for container health
+      community.docker.docker_compose_v2:
+        project_src: "{{ naive_gateway_release }}"
+        project_name: naive-gateway
+        files: [compose.yml, deployment.yml]
+        env_files:
+          - "{{ naive_gateway_release }}/versions.env"
+          - "{{ naive_gateway_config_dir }}/gateway.env"
+        build: never
+        pull: never
+        state: present
+        wait: true
+        wait_timeout: 180
+      register: naive_gateway_activation
+      no_log: true
+
+    - name: Wait for publicly trusted HTTPS
+      ansible.builtin.uri:
+        url: "https://{{ naive_gateway_domain }}/"
+        status_code: 200
+        validate_certs: true
+        timeout: 10
+      register: naive_gateway_https
+      until: naive_gateway_https is succeeded
+      retries: 36
+      delay: 5
+      when: naive_gateway_public_acceptance
+
+    - name: Run the server acceptance checks with the active runtime env
+      ansible.builtin.command:
+        argv: ["{{ naive_gateway_release }}/scripts/check-server.sh"]
+      changed_when: false
+      no_log: true
+      when: naive_gateway_public_acceptance
+
+    - name: Point operational commands at the accepted release
+      ansible.builtin.file:
+        src: "{{ naive_gateway_release }}"
+        dest: "{{ naive_gateway_root }}/current"
+        state: link
+        owner: root
+        group: root
+  rescue:
+    - name: Collect redacted gateway diagnostics
+      ansible.builtin.include_tasks: diagnostics.yml
+
+    - name: Report a safe deployment failure
+      ansible.builtin.fail:
+        msg: >-
+          Gateway candidate validation or activation failed. Existing releases and saved
+          credentials were retained. Resolve the failed task and rerun make deploy;
+          deployment was not declared healthy. Failed stage: {{ ansible_failed_task.name }}.

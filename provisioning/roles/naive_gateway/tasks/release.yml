@@ -1,0 +1,92 @@
+---
+- name: Fetch the explicitly requested source ref
+  ansible.builtin.git:
+    repo: "{{ naive_gateway_repository }}"
+    dest: "{{ naive_gateway_root }}/repository"
+    version: "{{ naive_gateway_ref }}"
+    depth: 1
+    refspec: "{{ naive_gateway_ref if naive_gateway_ref is match('^[0-9a-f]{40}$') else omit }}"
+    single_branch: true
+    recursive: false
+    force: false
+  register: naive_gateway_source
+  no_log: true
+
+- name: Verify the resolved source commit
+  ansible.builtin.command:
+    argv: [/usr/bin/git, -C, "{{ naive_gateway_root }}/repository", rev-parse, HEAD]
+  register: naive_gateway_commit
+  changed_when: false
+
+- name: Require the requested source revision
+  ansible.builtin.assert:
+    that:
+      - naive_gateway_commit.stdout is match('^[0-9a-f]{40}$')
+      - naive_gateway_commit.stdout == naive_gateway_source.after
+      - not (naive_gateway_ref is match('^[0-9a-f]{40}$')) or naive_gateway_commit.stdout == naive_gateway_ref
+    quiet: true
+
+- name: Derive candidate paths and image
+  ansible.builtin.set_fact:
+    naive_gateway_release: "{{ naive_gateway_root }}/releases/{{ naive_gateway_commit.stdout }}"
+    naive_gateway_image: "naive-gateway-caddy:git-{{ naive_gateway_commit.stdout }}"
+
+- name: Create the immutable release directory
+  ansible.builtin.file:
+    path: "{{ naive_gateway_release }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Inspect release completion marker
+  ansible.builtin.stat:
+    path: "{{ naive_gateway_release }}/.release-complete"
+  register: naive_gateway_release_marker
+
+- name: Export tracked source files for an unfinished release
+  when: not naive_gateway_release_marker.stat.exists
+  block:
+    - name: Archive the resolved commit
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/git
+          - -C
+          - "{{ naive_gateway_root }}/repository"
+          - archive
+          - --format=tar
+          - "--output={{ naive_gateway_root }}/release.tar"
+          - "{{ naive_gateway_commit.stdout }}"
+      changed_when: true
+
+    - name: Extract the candidate without touching active bind mounts
+      ansible.builtin.unarchive:
+        src: "{{ naive_gateway_root }}/release.tar"
+        dest: "{{ naive_gateway_release }}"
+        remote_src: true
+        owner: root
+        group: root
+
+    - name: Mark the source snapshot complete
+      ansible.builtin.copy:
+        content: "{{ naive_gateway_commit.stdout }}\n"
+        dest: "{{ naive_gateway_release }}/.release-complete"
+        owner: root
+        group: root
+        mode: "0600"
+
+- name: Pin the release image independently of the active image
+  ansible.builtin.copy:
+    content: "{{ {'services': {'caddy': {'image': naive_gateway_image}}} | to_nice_yaml }}"
+    dest: "{{ naive_gateway_release }}/deployment.yml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Record the runtime path for release-local operational commands
+  ansible.builtin.copy:
+    content: "{{ naive_gateway_config_dir }}/gateway.env\n"
+    dest: "{{ naive_gateway_release }}/.runtime-env-path"
+    owner: root
+    group: root
+    mode: "0644"

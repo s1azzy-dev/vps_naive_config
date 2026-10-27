@@ -1,46 +1,58 @@
 # Naive Gateway for VPS
 
-Минимальный Docker-проект для запуска NaiveProxy-сервера на чистом VPS. Клиентская конфигурация в репозиторий не входит.
+Naive Gateway разворачивается на чистом Ubuntu/Debian VPS через Ansible. Локальный
+controller проверяет настройки и SSH, Ansible настраивает пользователя, firewall,
+Docker и Caddy. Клиентская конфигурация в репозиторий не входит.
 
-## Статус Ansible provisioning
+## Установка
 
-Локально реализованы и проверены bootstrap, user, SSH, UFW/`DOCKER-USER` и
-Docker roles. Полные production gates намеренно открыты до reconnect,
-lockout-negative, systemd/reboot и внешнего port-scan E2E на disposable VM/VPS.
-Настроенный production VPS этой веткой пока не изменяйте.
+Подготовьте VPS с доступом по SSH-ключу, домен с `A`-записью на его публичный
+IPv4 и доступные `22/tcp` (или выбранный SSH-порт), `80/tcp`, `443/tcp`.
+Если есть `AAAA`, она должна указывать на доступный IPv6 этого VPS.
 
-Нужны:
-
-- чистый VPS с Ubuntu 22.04/24.04/26.04 или Debian 12/13;
-- домен с `A`-записью на публичный IPv4 VPS;
-- открытые входящие порты `22/tcp`, `80/tcp`, `443/tcp`; `443/udp` закрыт.
-
-`.env` копируется из `.env.example`, получает mode `0600` и заполняется
-пользователем вручную. Значения и секреты не передаются через CLI. Переходный
-`install.sh` больше не устанавливает Docker: он требует host, уже подготовленный
-Ansible. Gateway deployment/controller будут завершены в фазах 7–8.
-
-Текущий подробный workflow и открытые gates: [план provisioning](docs/ansible-provisioning-plan.md).
-
-## Управление
+На своём компьютере:
 
 ```bash
-sudo make status              # состояние контейнера
-sudo make check               # полная внешняя проверка
-sudo make logs                # журналы Caddy
-sudo make backup              # архив конфигурации и секретов
-sudo make rotate-credentials  # новые учётные данные
-sudo make update              # git pull, пересборка и проверка
+make init
+# Заполните .env в редакторе: VPS_HOST, SSH_PRIVATE_KEY, DOMAIN, ACME_EMAIL.
+make tooling
+make provision
 ```
 
-Подробная подготовка VPS и диагностика: [docs/vps-setup.md](docs/vps-setup.md).
+Используйте абсолютный путь к приватному ключу. Публичный ключ по умолчанию
+ищется рядом с ним с расширением `.pub`. `GATEWAY_REF` должен указывать на
+опубликованный commit или ветку с нужной версией проекта: Ansible получает исходники
+непосредственно на VPS и не копирует незакоммиченные изменения controller.
+Приватный Git-репозиторий должен быть доступен root-пользователю VPS.
 
-## Что остаётся на сервере
+`make provision` выбирает bootstrap или уже подготовленный host, запрашивает
+sudo-пароль без echo, разворачивает gateway и проверяет его. В интерактивном
+терминале в конце показываются endpoint и учётные данные. После установки их
+можно повторно получить командой `make credentials`. Локальный `.env` не
+копируется на сервер; runtime credentials хранятся в
+`/etc/naive-gateway/gateway.env` с правами `root:root 0600`.
 
-- один контейнер Caddy;
-- публичный HTTPS-сайт для обычного ответа на домене;
-- Naive forward proxy на том же `443/tcp`;
-- Docker volumes с сертификатами Caddy;
-- `.env` с доменом и учётными данными.
+Доступные отдельные команды: `make check-config`, `make preflight`,
+`make bootstrap`, `make deploy`, `make verify` и `make credentials`.
+Обновление выполняется с controller через `make deploy`.
 
-Версии Caddy и модуля `forwardproxy` закреплены в `versions.env`; автоматического слежения за `latest` нет.
+## Управление на VPS
+
+```bash
+sudo make -C /opt/naive-gateway/current status
+sudo make -C /opt/naive-gateway/current check
+sudo make -C /opt/naive-gateway/current logs
+sudo make -C /opt/naive-gateway/current validate
+sudo make -C /opt/naive-gateway/current backup
+sudo make -C /opt/naive-gateway/current rotate-credentials
+sudo make -C /opt/naive-gateway/current restart
+```
+
+Backup сохраняется в `/var/backups/naive-gateway/` с правами `0600` и содержит
+действующие секреты. Источник обновляется на controller; версии Caddy и
+`forwardproxy` закреплены в `versions.env` и не следуют за `latest`.
+
+Подробности, восстановление и диагностика: [docs/vps-setup.md](docs/vps-setup.md).
+Открытые приёмочные проверки: [план provisioning](docs/ansible-provisioning-plan.md).
+Приёмка на disposable VPS, включая SSH reconnect, firewall, reboot и публичный
+TLS/proxy, пока не выполнена.

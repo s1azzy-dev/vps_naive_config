@@ -11,31 +11,30 @@ require_command curl
 require_command openssl
 require_command docker
 
-tmp_dir=$(mktemp -d)
-trap 'rm -rf "$tmp_dir"' EXIT
+container_id=$(compose ps -q caddy)
+[[ -n $container_id ]] || die "caddy container is not running"
+started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 printf 'Checking website... '
-status=$(curl -fsS --max-time 15 -o "$tmp_dir/site.html" -w '%{http_code}' "https://${DOMAIN}/")
+site=$(curl -fsS --max-time 15 --max-filesize 1048576 -w '\n%{http_code}' "https://${DOMAIN}/")
+status=${site##*$'\n'}
 [[ $status == 200 ]] || die "website returned HTTP $status"
-grep -Fq 'Northline Notes' "$tmp_dir/site.html" || die "homepage marker not found"
+[[ $site == *'Northline Notes'* ]] || die "homepage marker not found"
 printf 'OK (HTTP 200)\n'
 
 printf 'Checking TLS hostname, trust, and HTTP/2... '
-if ! openssl s_client -connect "${DOMAIN}:443" -servername "$DOMAIN" -verify_hostname "$DOMAIN" \
-  -verify_return_error -alpn h2 </dev/null >"$tmp_dir/tls.txt" 2>&1; then
+if ! tls=$(openssl s_client -connect "${DOMAIN}:443" -servername "$DOMAIN" -verify_hostname "$DOMAIN" \
+  -verify_return_error -alpn h2 </dev/null 2>&1); then
   die "TLS handshake or verification failed"
 fi
-grep -Fq 'Verify return code: 0 (ok)' "$tmp_dir/tls.txt" || die "certificate is not publicly trusted"
-grep -Fq 'ALPN protocol: h2' "$tmp_dir/tls.txt" || die "HTTP/2 was not negotiated"
+[[ $tls == *'Verify return code: 0 (ok)'* ]] || die "certificate is not publicly trusted"
+[[ $tls == *'ALPN protocol: h2'* ]] || die "HTTP/2 was not negotiated"
 printf 'OK\n'
 
 printf 'Checking unauthenticated CONNECT probe resistance... '
-set +e
-curl -sS --max-time 15 --proxy "https://${DOMAIN}:443" https://example.com/ \
-  -D "$tmp_dir/probe.headers" -o "$tmp_dir/probe.body" 2>"$tmp_dir/probe.error"
-set -e
-if grep -Eiq '(^|[[:space:]])407([[:space:]]|$)|Proxy-Authenticate|forward proxy' \
-  "$tmp_dir/probe.headers" "$tmp_dir/probe.body" "$tmp_dir/probe.error"; then
+probe=$(curl -sS --include --max-time 15 --max-filesize 1048576 \
+  --proxy "https://${DOMAIN}:443" https://example.com/ 2>&1 || true)
+if grep -Eiq '(^|[[:space:]])407([[:space:]]|$)|Proxy-Authenticate|forward proxy' <<<"$probe"; then
   die "unauthenticated probe exposed an obvious forward-proxy response"
 fi
 printf 'OK\n'
@@ -46,10 +45,16 @@ if curl --help all 2>/dev/null | grep -q -- '--proxy-http2'; then
   proxy_h2=(--proxy-http2)
 fi
 proxy_ok=0
+proxy_host=
 for target in https://example.com/ https://www.cloudflare.com/cdn-cgi/trace; do
-  if curl -fsS --max-time 25 "${proxy_h2[@]}" --proxy "https://${DOMAIN}:443" \
-    --proxy-user "${NAIVE_USER}:${NAIVE_PASSWORD}" "$target" -o /dev/null; then
+  target_host=${target#https://}
+  target_host=${target_host%%/*}
+  [[ ${DOMAIN,,} == "$target_host" ]] && continue
+  if printf 'proxy-user = "%s:%s"\n' "$NAIVE_USER" "$NAIVE_PASSWORD" | \
+    curl --config - -fsS --max-time 25 "${proxy_h2[@]}" --proxy "https://${DOMAIN}:443" \
+      "$target" -o /dev/null; then
     proxy_ok=1
+    proxy_host=$target_host
     break
   fi
 done
@@ -57,8 +62,6 @@ done
 printf 'OK\n'
 
 printf 'Checking container state and health... '
-container_id=$(compose ps -q caddy)
-[[ -n $container_id ]] || die "caddy container is not running"
 health=starting
 for _ in {1..12}; do
   health=$(docker inspect --format '{{.State.Health.Status}}' "$container_id" 2>/dev/null || true)
@@ -66,4 +69,16 @@ for _ in {1..12}; do
   sleep 5
 done
 [[ $health == healthy ]] || die "caddy health is $health"
+printf 'OK\n'
+
+printf 'Checking proxy destination log suppression... '
+logs=$(docker logs --since "$started" "$container_id" 2>&1) || die "cannot read Caddy logs"
+case "$proxy_host" in
+  example.com) destination_pattern='(^|[^a-z0-9.-])example\.com([^a-z0-9.-]|$)' ;;
+  www.cloudflare.com) destination_pattern='(^|[^a-z0-9.-])www\.cloudflare\.com([^a-z0-9.-]|$)' ;;
+  *) die "unexpected proxy test destination" ;;
+esac
+if grep -Eiq "$destination_pattern" <<<"$logs"; then
+  die "proxy destination appeared in Caddy logs"
+fi
 printf 'OK\n\nServer checks passed.\n'

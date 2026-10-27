@@ -1,8 +1,17 @@
 ---
 - name: Deploy the Naive gateway
   hosts: naive_gateway
-  gather_facts: true
+  gather_facts: false
   become: true
+  pre_tasks:
+    - name: Verify managed-user sudo before any deployment changes
+      become_flags: -H -S -k
+      ansible.builtin.command: /usr/bin/true
+      changed_when: false
+      no_log: true
+
+    - name: Gather target facts after sudo verification
+      ansible.builtin.setup:
   roles:
     - role: docker
     - role: naive_gateway

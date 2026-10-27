@@ -128,9 +128,9 @@ def _check_collection_versions(root: Path) -> None:
 def check_tooling(root: Path | None = None) -> None:
     """Verify system commands, locked Python tools, OpenSSH, and collections."""
     root = root or project_root()
-    if sys.version_info[:2] not in {(3, 12), (3, 13), (3, 14)}:
+    if sys.version_info[:2] != (3, 14):
         version = f"{sys.version_info.major}.{sys.version_info.minor}"
-        raise ToolingError(f"Python 3.12-3.14 is required; found {version}")
+        raise ToolingError(f"Python 3.14 is required; found {version}")
     for command_name in ("ssh", "ssh-keygen", "make", "git"):
         if shutil.which(command_name) is None:
             raise ToolingError(f"required command is missing: {command_name}")

@@ -126,3 +126,34 @@ def test_bootstrap_cli_reads_config_and_renders_skip(
     captured = capsys.readouterr()
     assert captured.out == ("Configuration: OK\nBootstrap: SKIP (managed host already hardened)\n")
     assert captured.err == ""
+
+
+def test_deploy_cli_prints_endpoint_without_credentials(
+    config_factory: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli_module, "run_deploy", lambda _settings: None)
+    password = "private-password"
+    config = config_factory(NAIVE_USER="private-user", NAIVE_PASSWORD=password)
+    assert main(["deploy", "--config", str(config)]) == 0
+    captured = capsys.readouterr()
+    assert "Deploy: PASS" in captured.out
+    assert "Website: https://" in captured.out
+    assert "private-user" not in captured.out
+    assert "private-password" not in captured.out
+
+
+def test_credentials_are_never_printed_to_a_noninteractive_stream(
+    config_factory: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_read(*_args: object) -> tuple[str, str, str]:
+        pytest.fail("credentials must not be read for a noninteractive output stream")
+
+    monkeypatch.setattr(cli_module, "read_credentials", unexpected_read)
+    assert main(["credentials", "--config", str(config_factory())]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "interactive terminal" in output.err

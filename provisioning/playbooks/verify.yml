@@ -1,8 +1,367 @@
 ---
-- name: Verify the Naive gateway
+- name: Verify the managed gateway without changing its configuration
   hosts: naive_gateway
   gather_facts: false
+  become: true
+  environment:
+    LC_ALL: C
+  vars:
+    verify_release_root: /opt/naive-gateway
+    verify_runtime_env: /etc/naive-gateway/gateway.env
+    verify_expected_ufw:
+      - "ufw limit {{ verify_ssh_port }}/tcp"
+      - ufw allow 80/tcp
+      - ufw allow 443/tcp
+    verify_expected_user_chain:
+      - -N DOCKER-USER
+      - -A DOCKER-USER -j NAIVE-GATEWAY-DOCKER
+      - -A DOCKER-USER -j RETURN
+    verify_expected_managed_chain:
+      - -N NAIVE-GATEWAY-DOCKER
+      - -A NAIVE-GATEWAY-DOCKER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+      - -A NAIVE-GATEWAY-DOCKER -o docker0 -p tcp -m conntrack --ctstate NEW --ctorigdstport 80 -j RETURN
+      - -A NAIVE-GATEWAY-DOCKER -o docker0 -p tcp -m conntrack --ctstate NEW --ctorigdstport 443 -j RETURN
+      - -A NAIVE-GATEWAY-DOCKER -o br+ -p tcp -m conntrack --ctstate NEW --ctorigdstport 80 -j RETURN
+      - -A NAIVE-GATEWAY-DOCKER -o br+ -p tcp -m conntrack --ctstate NEW --ctorigdstport 443 -j RETURN
+      - -A NAIVE-GATEWAY-DOCKER -o docker0 -j DROP
+      - -A NAIVE-GATEWAY-DOCKER -o br+ -j DROP
+      - -A NAIVE-GATEWAY-DOCKER -j RETURN
   tasks:
-    - name: Stop until remote verification is implemented
-      ansible.builtin.fail:
-        msg: Remote verification is not implemented yet.
+    - name: Read effective SSH configuration
+      ansible.builtin.command:
+        argv: [/usr/sbin/sshd, -T]
+      register: verify_sshd
+      changed_when: false
+
+    - name: Require the configured SSH hardening
+      ansible.builtin.assert:
+        that:
+          - "'pubkeyauthentication yes' in verify_sshd.stdout_lines"
+          - "'passwordauthentication no' in verify_sshd.stdout_lines"
+          - "'kbdinteractiveauthentication no' in verify_sshd.stdout_lines"
+          - "'permitrootlogin no' in verify_sshd.stdout_lines"
+          - "('port ' ~ (verify_ssh_port | string)) in verify_sshd.stdout_lines"
+        fail_msg: Effective SSH settings are not hardened.
+        quiet: true
+
+    - name: Report effective SSH configuration
+      ansible.builtin.debug:
+        msg: 'SSH configuration: PASS'
+
+    - name: Read firewall state
+      ansible.builtin.command:
+        argv: [/usr/sbin/ufw, status, verbose]
+      register: verify_ufw
+      changed_when: false
+
+    - name: Read explicit firewall rules
+      ansible.builtin.command:
+        argv: [/usr/sbin/ufw, show, added]
+      register: verify_ufw_added
+      changed_when: false
+
+    - name: Require the exact UFW allowlist
+      ansible.builtin.assert:
+        that:
+          - "'Status: active' in verify_ufw.stdout"
+          - "'Default: deny (incoming), allow (outgoing)' in verify_ufw.stdout"
+          - verify_ufw_added.stdout_lines | select('match', '^ufw ') | list | sort == verify_expected_ufw | sort
+        fail_msg: UFW is inactive or its rules differ from the expected allowlist.
+        quiet: true
+
+    - name: Read active IPv4 and IPv6 Docker ingress chains
+      ansible.builtin.command:
+        argv: ["/usr/sbin/{{ item.binary }}", -S, "{{ item.chain }}"]
+      loop:
+        - {binary: iptables, chain: DOCKER-USER}
+        - {binary: iptables, chain: NAIVE-GATEWAY-DOCKER}
+        - {binary: ip6tables, chain: DOCKER-USER}
+        - {binary: ip6tables, chain: NAIVE-GATEWAY-DOCKER}
+      register: verify_ingress
+      changed_when: false
+
+    - name: Require the exact active Docker ingress boundary
+      ansible.builtin.assert:
+        that:
+          - verify_ingress.results[0].stdout_lines == verify_expected_user_chain
+          - verify_ingress.results[1].stdout_lines == verify_expected_managed_chain
+          - verify_ingress.results[2].stdout_lines == verify_expected_user_chain
+          - verify_ingress.results[3].stdout_lines == verify_expected_managed_chain
+        fail_msg: Docker ingress rules are missing or changed.
+        quiet: true
+
+    - name: Report firewall checks
+      ansible.builtin.debug:
+        msg: 'Firewall: PASS'
+
+    - name: Read managed user groups
+      ansible.builtin.command:
+        argv: [/usr/bin/id, --groups, --name, "{{ verify_user }}"]
+      register: verify_groups
+      changed_when: false
+
+    - name: Require no managed-user Docker access
+      ansible.builtin.assert:
+        that: "'docker' not in verify_groups.stdout.split()"
+        quiet: true
+
+    - name: Check Docker service and Compose
+      ansible.builtin.command:
+        argv: "{{ item }}"
+      loop:
+        - [systemctl, is-enabled, docker]
+        - [systemctl, is-active, docker]
+        - [docker, compose, version]
+      changed_when: false
+
+    - name: Read the persistent Docker daemon policy
+      ansible.builtin.slurp:
+        src: /etc/docker/daemon.json
+      register: verify_daemon_config
+
+    - name: Require safe Docker publication defaults
+      ansible.builtin.assert:
+        that:
+          - daemon_config.get('allow-direct-routing') == false
+          - daemon_config.get('firewall-backend') == 'iptables'
+          - daemon_config.get('iptables') == true
+          - daemon_config.get('ip6tables') == true
+          - daemon_config.get('default-network-opts', {}).get('bridge', {}).get('com.docker.network.bridge.host_binding_ipv4') == '127.0.0.1'
+        quiet: true
+      vars:
+        daemon_config: "{{ verify_daemon_config.content | b64decode | from_json }}"
+
+    - name: Inspect protected deployment paths
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - "{{ verify_release_root }}"
+        - "{{ verify_release_root }}/repository"
+        - "{{ verify_release_root }}/current"
+        - "{{ verify_runtime_env }}"
+        - /var/run/docker.sock
+      register: verify_paths
+
+    - name: Require root ownership and private runtime credentials
+      ansible.builtin.assert:
+        that:
+          - verify_paths.results[0].stat.isdir | default(false)
+          - verify_paths.results[0].stat.uid == 0
+          - verify_paths.results[0].stat.mode in ['0700', '0750', '0755']
+          - verify_paths.results[1].stat.isdir | default(false)
+          - verify_paths.results[1].stat.uid == 0
+          - verify_paths.results[1].stat.mode in ['0700', '0750', '0755']
+          - verify_paths.results[2].stat.islnk | default(false)
+          - verify_paths.results[2].stat.uid == 0
+          - verify_paths.results[3].stat.isreg | default(false)
+          - verify_paths.results[3].stat.uid == 0
+          - verify_paths.results[3].stat.gid == 0
+          - verify_paths.results[3].stat.mode == '0600'
+          - verify_paths.results[4].stat.issock | default(false)
+          - verify_paths.results[4].stat.uid == 0
+          - verify_paths.results[4].stat.gr_name == 'docker'
+          - verify_paths.results[4].stat.mode == '0660'
+        fail_msg: Deployment paths or runtime credentials have unsafe ownership or mode.
+        quiet: true
+
+    - name: Read runtime configuration privately
+      ansible.builtin.slurp:
+        src: "{{ verify_runtime_env }}"
+      register: verify_runtime
+      no_log: true
+
+    - name: Confirm the configured domain and ACME contact
+      ansible.builtin.assert:
+        that:
+          - "('DOMAIN=' ~ verify_domain) in (verify_runtime.content | b64decode).splitlines()"
+          - "('ACME_EMAIL=' ~ verify_acme_email) in (verify_runtime.content | b64decode).splitlines()"
+        quiet: true
+      no_log: true
+
+    - name: Confirm explicitly configured credentials match the runtime file
+      ansible.builtin.assert:
+        that:
+          - "('NAIVE_USER=' ~ verify_naive_user) in (verify_runtime.content | b64decode).splitlines()"
+          - "('NAIVE_PASSWORD=' ~ verify_naive_password) in (verify_runtime.content | b64decode).splitlines()"
+        quiet: true
+      no_log: true
+      when: verify_naive_user | length > 0
+
+    - name: Read deployed commit
+      ansible.builtin.command:
+        argv: [git, -C, "{{ verify_release_root }}/repository", rev-parse, HEAD]
+      register: verify_commit
+      changed_when: false
+
+    - name: Read configured repository URL privately
+      ansible.builtin.command:
+        argv: [git, -C, "{{ verify_release_root }}/repository", remote, get-url, origin]
+      register: verify_origin
+      changed_when: false
+      no_log: true
+
+    - name: Verify repository, commit and active release
+      ansible.builtin.assert:
+        that:
+          - verify_origin.stdout == verify_repository
+          - verify_commit.stdout is match('^[0-9a-f]{40}$')
+          - verify_paths.results[2].stat.lnk_source == verify_release_root ~ '/releases/' ~ verify_commit.stdout
+          - not (verify_ref is match('^[0-9a-f]{40}$')) or verify_commit.stdout == verify_ref
+        quiet: true
+      no_log: true
+
+    - name: Read the specified branch or tag from origin
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - "{{ verify_release_root }}/repository"
+          - ls-remote
+          - --exit-code
+          - origin
+          - "refs/heads/{{ verify_ref }}"
+          - "refs/tags/{{ verify_ref }}"
+          - "refs/tags/{{ verify_ref }}^{}"
+      register: verify_remote_ref
+      changed_when: false
+      no_log: true
+      when: not (verify_ref is match('^[0-9a-f]{40}$'))
+
+    - name: Require the active commit to match the requested remote ref
+      ansible.builtin.assert:
+        that: verify_remote_ref.stdout is search('(?m)^' ~ verify_commit.stdout ~ '\s')
+        quiet: true
+      no_log: true
+      when: not (verify_ref is match('^[0-9a-f]{40}$'))
+
+    - name: Inspect the running Compose configuration privately
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/env
+          - -u
+          - DOMAIN
+          - -u
+          - ACME_EMAIL
+          - -u
+          - NAIVE_USER
+          - -u
+          - NAIVE_PASSWORD
+          - -u
+          - CADDY_VERSION
+          - -u
+          - FORWARDPROXY_COMMIT
+          - docker
+          - compose
+          - --project-directory
+          - "{{ verify_release_root }}/current"
+          - --env-file
+          - "{{ verify_release_root }}/current/versions.env"
+          - --env-file
+          - "{{ verify_runtime_env }}"
+          - -f
+          - "{{ verify_release_root }}/current/compose.yml"
+          - -f
+          - "{{ verify_release_root }}/current/deployment.yml"
+          - config
+          - --format
+          - json
+      register: verify_compose
+      changed_when: false
+      no_log: true
+
+    - name: Require only the expected gateway publications
+      ansible.builtin.assert:
+        that:
+          - verify_compose_json.services.keys() | list == ['caddy']
+          - verify_compose_json.services.caddy.ports | length == 2
+          - verify_compose_json.services.caddy.ports | map(attribute='host_ip') | unique | list == ['0.0.0.0']
+          - verify_compose_json.services.caddy.ports | map(attribute='protocol') | unique | list == ['tcp']
+          - verify_compose_json.services.caddy.ports | map(attribute='published') | map('string') | sort == ['443', '80']
+          - verify_compose_json.services.caddy.ports | map(attribute='target') | map('int') | sort == [80, 443]
+          - verify_compose_json.services.caddy.get('network_mode', '') == ''
+          - not verify_compose_json.services.caddy.get('privileged', false)
+        quiet: true
+      vars:
+        verify_compose_json: "{{ verify_compose.stdout | from_json }}"
+      no_log: true
+
+    - name: Find containers belonging to the gateway project
+      ansible.builtin.command:
+        argv:
+          - docker
+          - ps
+          - --all
+          - --quiet
+          - --filter
+          - label=com.docker.compose.project=naive-gateway
+      register: verify_containers
+      changed_when: false
+
+    - name: Require exactly one gateway container
+      ansible.builtin.assert:
+        that: verify_containers.stdout_lines | length == 1
+        quiet: true
+
+    - name: Read the running gateway image
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - --format
+          - '{{ "{{.Config.Image}}" }}'
+          - "{{ verify_containers.stdout_lines[0] }}"
+      register: verify_container_image
+      changed_when: false
+
+    - name: Require the running image to match the accepted release
+      ansible.builtin.assert:
+        that: verify_container_image.stdout == 'naive-gateway-caddy:git-' ~ verify_commit.stdout
+        quiet: true
+
+    - name: Read the actual gateway port bindings
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - --format
+          - '{{ "{{json .NetworkSettings.Ports}}" }}'
+          - "{{ verify_containers.stdout_lines[0] }}"
+      register: verify_actual_ports
+      changed_when: false
+
+    - name: Require actual publications to match the allowlist
+      ansible.builtin.assert:
+        that:
+          - >-
+            actual_ports | dict2items | rejectattr('value', 'equalto', none) |
+            map(attribute='key') | list | sort == ['443/tcp', '80/tcp']
+          - >-
+            actual_ports['80/tcp'] == [{'HostIp': '0.0.0.0', 'HostPort': '80'}]
+          - >-
+            actual_ports['443/tcp'] == [{'HostIp': '0.0.0.0', 'HostPort': '443'}]
+        quiet: true
+      vars:
+        actual_ports: "{{ verify_actual_ports.stdout | from_json }}"
+
+    - name: Report Docker and release checks
+      ansible.builtin.debug:
+        msg: ['Docker: PASS', 'Release and published ports: PASS']
+
+    - name: Check public HTTPS, TLS, proxy and container health
+      ansible.builtin.command:
+        argv: ["{{ verify_release_root }}/current/scripts/check-server.sh"]
+      register: verify_gateway
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Require the gateway acceptance checks
+      ansible.builtin.assert:
+        that: verify_gateway.rc == 0
+        fail_msg: Gateway check failed; on the VPS run sudo make -C /opt/naive-gateway/current check.
+        quiet: true
+
+    - name: Report gateway checks
+      ansible.builtin.debug:
+        msg: ['Website: PASS', 'TLS and HTTP/2: PASS', 'Proxy and log redaction: PASS', 'Container health: PASS']
