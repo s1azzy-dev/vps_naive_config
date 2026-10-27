@@ -94,5 +94,5 @@ loopback bind, UFW reload, Docker restart, exact chains и negative adoption.
 Это не заменяет systemd boot и внешний network E2E на disposable VM/VPS.
 
 GitHub Actions отдельно выполняет полный quality gate, pytest на Python
-3.12–3.14 и Docker/Caddy runtime smoke. Workflow не запускает `preflight` и не
+3.14 и Docker/Caddy runtime smoke. Workflow не запускает `preflight` и не
 подключается к VPS.

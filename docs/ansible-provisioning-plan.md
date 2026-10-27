@@ -244,7 +244,7 @@ Make остаётся стабильным пользовательским faca
 
 Пошагово:
 
-1. Проверяет наличие Python 3.12–3.14, `ssh`, `ssh-keygen`, `make` и Git.
+1. Проверяет наличие Python 3.14, `ssh`, `ssh-keygen`, `make` и Git.
 2. Создаёт или повторно использует project-local `.venv`.
 3. Устанавливает точную версию uv в project-local `.venv`.
 4. Выполняет `uv sync --frozen` по `pyproject.toml` и `uv.lock`.
@@ -663,6 +663,8 @@ Live DNS/SSH preflight не выполнялся: локальный `.env` от
 
 ### Этап 3.6. Настроить полный CI quality pipeline
 
+Исторический результат этапа приведён ниже; текущая поддерживаемая версия контроллера и CI — только Python 3.14.
+
 Работы:
 
 - заменить устаревший single-job workflow на отдельные quality, Python tests и runtime smoke jobs;
@@ -672,7 +674,7 @@ Live DNS/SSH preflight не выполнялся: локальный `.env` от
 - закрепить все сторонние Actions полными commit SHA с комментариями release versions;
 - использовать Ubuntu 24.04 и явно заданные Python versions;
 - в quality job устанавливать обязательный shellcheck и выполнять `make tooling`, затем `make lint`;
-- в test matrix выполнять `make tooling` и `make test` на Python 3.12, 3.13 и 3.14;
+- выполнять `make tooling` и `make test` на Python 3.14;
 - кэшировать project-local uv cache по `uv.lock`, не кэшировать `.venv`;
 - в отдельном runtime job собирать pinned Caddy image, выполнять Caddy validate, проверять наличие `forward_proxy` module и запускать `tests/smoke-local.sh`;
 - использовать только фиктивные CI credentials и не обращаться к реальному VPS, DNS или SSH;
@@ -683,7 +685,7 @@ Gate 3.6:
 - [x] workflow имеет минимальные permissions, concurrency cancellation и bounded timeouts;
 - [x] сторонние Actions закреплены полными SHA;
 - [x] quality job выполняет весь `make lint` и требует shellcheck;
-- [x] pytest проходит на Python 3.12, 3.13 и 3.14;
+- [x] pytest проходит на Python 3.14;
 - [x] Docker Compose config, Caddy validate/module check и runtime smoke выполняются отдельно;
 - [x] workflow не читает production `.env`, не использует repository secrets и не подключается к VPS;
 - [x] локальные `make lint`, `make test` и workflow contract tests проходят;

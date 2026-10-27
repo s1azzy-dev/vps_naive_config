@@ -67,7 +67,7 @@ tooling:
 		command -v "$$command_name" >/dev/null 2>&1 || { printf 'Tooling: ERROR: required command is missing: %s\n' "$$command_name" >&2; exit 1; }; \
 	done
 	@python_version="$$($(PYTHON) -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"; \
-		case "$$python_version" in 3.12|3.13|3.14) ;; *) printf 'Tooling: ERROR: Python 3.12-3.14 is required; found %s\n' "$$python_version" >&2; exit 1 ;; esac
+		case "$$python_version" in 3.14) ;; *) printf 'Tooling: ERROR: Python 3.14 is required; found %s\n' "$$python_version" >&2; exit 1 ;; esac
 	@printf 'Creating or reusing controller virtualenv: %s\n' "$(VENV_PATH)"
 	@$(PYTHON) -m venv "$(VENV_PATH)"
 	@if ! "$(VENV_BIN)/python" -c 'import importlib.metadata, sys; raise SystemExit(importlib.metadata.version("uv") != sys.argv[1])' "$(UV_VERSION)" 2>/dev/null; then \

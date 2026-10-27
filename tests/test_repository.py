@@ -265,8 +265,14 @@ def test_ci_workflow_covers_every_quality_layer() -> None:
     assert any(step.get("env", {}).get("REQUIRE_SHELLCHECK") == "1" for step in quality_steps)
 
     test_job = jobs["tests"]
-    assert test_job["strategy"]["fail-fast"] is False
-    assert test_job["strategy"]["matrix"]["python-version"] == ["3.12", "3.13", "3.14"]
+    for job_name in ("quality", "tests", "molecule"):
+        python_steps = [
+            step
+            for step in jobs[job_name]["steps"]
+            if step.get("uses", "").startswith("actions/setup-python@")
+        ]
+        assert len(python_steps) == 1
+        assert python_steps[0]["with"]["python-version"] == "3.14"
     test_commands = "\n".join(step.get("run", "") for step in test_job["steps"])
     assert "make tooling" in test_commands
     assert "make test" in test_commands
