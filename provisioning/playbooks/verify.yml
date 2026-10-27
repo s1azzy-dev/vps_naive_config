@@ -336,8 +336,10 @@
           - >-
             actual_ports | dict2items | rejectattr('value', 'equalto', none) |
             map(attribute='key') | list | sort == ['443/tcp', '80/tcp']
-          - actual_ports['80/tcp'] == [{'HostIp': '0.0.0.0', 'HostPort': '80'}]
-          - actual_ports['443/tcp'] == [{'HostIp': '0.0.0.0', 'HostPort': '443'}]
+          - >-
+            actual_ports['80/tcp'] == [{'HostIp': '0.0.0.0', 'HostPort': '80'}]
+          - >-
+            actual_ports['443/tcp'] == [{'HostIp': '0.0.0.0', 'HostPort': '443'}]
         quiet: true
       vars:
         actual_ports: "{{ verify_actual_ports.stdout | from_json }}"
