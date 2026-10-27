@@ -2,4 +2,36 @@
 argument_specs:
   main:
     short_description: Validate inputs for the naive_gateway role
-    options: {}
+    options:
+      naive_gateway_repository:
+        type: str
+        required: true
+        description: Reviewed Git repository accessible by the VPS root account.
+      naive_gateway_ref:
+        type: str
+        required: true
+        description: Explicit branch, tag or full commit to deploy.
+      naive_gateway_domain:
+        type: str
+        required: true
+        description: Domain validated by controller preflight.
+      naive_gateway_acme_email:
+        type: str
+        required: true
+        description: ACME contact from the controller configuration.
+      naive_gateway_user:
+        type: str
+        description: Optional explicit URL-safe username, paired with password.
+      naive_gateway_password:
+        type: str
+        no_log: true
+        description: Optional explicit URL-safe password, paired with username.
+      naive_gateway_root:
+        type: path
+        description: Root-owned source, release and current-link directory.
+      naive_gateway_config_dir:
+        type: path
+        description: Private directory holding active and pending runtime env.
+      naive_gateway_public_acceptance:
+        type: bool
+        description: Require public TLS and check-server; disabled only in isolated local-CA tests.

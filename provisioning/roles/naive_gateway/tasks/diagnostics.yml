@@ -1,0 +1,54 @@
+---
+- name: Find the gateway container for private diagnostics
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/docker
+      - ps
+      - --all
+      - --quiet
+      - --filter
+      - label=com.docker.compose.project=naive-gateway
+      - --filter
+      - label=com.docker.compose.service=caddy
+  register: naive_gateway_diagnostic_container
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Capture a bounded gateway log privately
+  ansible.builtin.command:
+    argv: [/usr/bin/docker, logs, --tail, '20', "{{ naive_gateway_diagnostic_container.stdout_lines[0] }}"]
+  register: naive_gateway_diagnostic_log
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: naive_gateway_diagnostic_container.stdout_lines | default([]) | length > 0
+
+- name: Prepare the diagnostic tail privately
+  ansible.builtin.set_fact:
+    naive_gateway_safe_log: >-
+      {{ naive_gateway_diagnostic_log.stdout | default('') }}
+      {{ naive_gateway_diagnostic_log.stderr | default('') }}
+    naive_gateway_old_diagnostic_values: >-
+      {{ dict((naive_gateway_saved_env.content | default('') | b64decode).splitlines() | map('split', '=', 1)) }}
+  no_log: true
+
+- name: Redact current and previous credentials before rendering logs
+  ansible.builtin.set_fact:
+    naive_gateway_safe_log: "{{ naive_gateway_safe_log | replace(item, '[redacted]') }}"
+  loop:
+    - "{{ (naive_gateway_credentials.NAIVE_USER + ':' + naive_gateway_credentials.NAIVE_PASSWORD) | b64encode }}"
+    - >-
+      {{ ((naive_gateway_old_diagnostic_values.NAIVE_USER | default('')) + ':' +
+          (naive_gateway_old_diagnostic_values.NAIVE_PASSWORD | default(''))) | b64encode }}
+    - "{{ naive_gateway_credentials.NAIVE_PASSWORD }}"
+    - "{{ naive_gateway_old_diagnostic_values.NAIVE_PASSWORD | default('') }}"
+    - "{{ naive_gateway_credentials.NAIVE_USER }}"
+    - "{{ naive_gateway_old_diagnostic_values.NAIVE_USER | default('') }}"
+  when: item | length > 0
+  no_log: true
+
+- name: Show the redacted gateway diagnostic tail
+  ansible.builtin.debug:
+    msg: "{{ naive_gateway_safe_log }}"
+  when: naive_gateway_safe_log | trim | length > 0

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import pytest
 
+from naive_gateway_controller import provisioning as provisioning_module
 from naive_gateway_controller.config import GatewaySettings, load_settings
 from naive_gateway_controller.errors import ProvisioningError
 from naive_gateway_controller.network import NetworkReport
@@ -16,7 +18,11 @@ from naive_gateway_controller.provisioning import (
     execute_ansible,
     hash_sudo_password,
     prompt_sudo_password,
+    read_credentials,
     run_bootstrap,
+    run_deploy,
+    run_provision,
+    run_verify,
 )
 from naive_gateway_controller.ssh import SSHAuthMethodsResult, SSHProbeResult, SSHStatus
 
@@ -216,3 +222,154 @@ def test_post_hardening_root_access_is_a_blocking_failure(
             auth_probe=SequencedAuthProbe(disabled_auth()),
             ansible_executor=RecordingExecutor(),
         )
+
+
+def test_deploy_refuses_bootstrap_before_prompt_or_execution(settings: GatewaySettings) -> None:
+    executor = RecordingExecutor()
+
+    def unexpected_prompt() -> str:
+        pytest.fail("deploy must refuse an unmanaged host before asking for sudo")
+
+    with pytest.raises(ProvisioningError, match="run make bootstrap first"):
+        run_deploy(
+            settings,
+            password_prompt=unexpected_prompt,
+            preflight_runner=_preflight(PreflightMode.BOOTSTRAP),
+            ansible_executor=executor,
+        )
+    assert executor.command == ()
+
+
+def test_deploy_uses_managed_user_and_pipe_only_secrets(
+    config_factory: Callable[..., Path],
+) -> None:
+    password = "secret"
+    settings = load_settings(config_factory(NAIVE_USER="explicit-user", NAIVE_PASSWORD=password))
+    executor = RecordingExecutor()
+    run_deploy(
+        settings,
+        password_prompt=lambda: "sudo-secret",
+        preflight_runner=_preflight(PreflightMode.MANAGED),
+        ansible_executor=executor,
+    )
+    assert executor.command[-1].endswith("/playbooks/deploy.yml")
+    assert executor.variables["ansible_user"] == settings.vps_user
+    assert executor.variables["naive_gateway_ref"] == settings.gateway_ref
+    assert executor.variables["naive_gateway_password"] == "secret"
+    assert executor.variables["ansible_become_password"] == "sudo-secret"
+    assert "secret" not in " ".join(executor.command)
+    assert "sudo-secret" not in executor.environment.values()
+    assert "bootstrap_apply_user" not in executor.variables
+
+
+def test_deploy_failure_is_reported_without_success(settings: GatewaySettings) -> None:
+    with pytest.raises(ProvisioningError, match="rerun make deploy"):
+        run_deploy(
+            settings,
+            password_prompt=lambda: "sudo-secret",
+            preflight_runner=_preflight(PreflightMode.MANAGED),
+            ansible_executor=RecordingExecutor(returncode=2),
+        )
+
+
+def test_provision_reuses_one_password_across_bootstrap_deploy_and_verify(
+    settings: GatewaySettings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    phases: list[tuple[str, str]] = []
+    password = "single-sudo-password"
+    monkeypatch.setattr(provisioning_module, "run_preflight", _preflight(PreflightMode.BOOTSTRAP))
+    monkeypatch.setattr(provisioning_module, "prompt_sudo_password", lambda: password)
+
+    def fake_stage(name: str) -> Callable[..., None]:
+        def run(_settings: GatewaySettings, **kwargs: object) -> None:
+            prompt = kwargs["password_prompt"]
+            assert callable(prompt)
+            phases.append((name, prompt()))
+
+        return run
+
+    monkeypatch.setattr(provisioning_module, "run_bootstrap", fake_stage("bootstrap"))
+    monkeypatch.setattr(provisioning_module, "run_deploy", fake_stage("deploy"))
+    monkeypatch.setattr(provisioning_module, "run_verify", fake_stage("verify"))
+
+    assert run_provision(settings, root=tmp_path) == password
+    assert phases == [("bootstrap", password), ("deploy", password), ("verify", password)]
+
+
+def test_verify_refuses_root_ssh_before_invoking_ansible(settings: GatewaySettings) -> None:
+    executor = RecordingExecutor()
+    with pytest.raises(ProvisioningError, match="root key login"):
+        run_verify(
+            settings,
+            preflight_runner=_preflight(PreflightMode.MANAGED),
+            ssh_probe=SequencedKeyProbe(SSHProbeResult(SSHStatus.OK)),
+            auth_probe=SequencedAuthProbe(disabled_auth()),
+            ansible_executor=executor,
+        )
+    assert executor.command == ()
+
+
+def test_provision_skips_bootstrap_only_when_ssh_is_hardened(
+    settings: GatewaySettings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    phases: list[str] = []
+    monkeypatch.setattr(provisioning_module, "run_preflight", _preflight(PreflightMode.MANAGED))
+    monkeypatch.setattr(
+        provisioning_module, "_probe_key", lambda *_args: SSHProbeResult(SSHStatus.AUTH_FAILED)
+    )
+    monkeypatch.setattr(provisioning_module, "_probe_auth", lambda *_args: disabled_auth())
+    monkeypatch.setattr(provisioning_module, "prompt_current_sudo_password", lambda: "existing")
+
+    def run_stage(name: str) -> Callable[..., None]:
+        def run(_settings: GatewaySettings, **kwargs: object) -> None:
+            prompt = kwargs["password_prompt"]
+            assert callable(prompt)
+            assert prompt() == "existing"
+            phases.append(name)
+
+        return run
+
+    monkeypatch.setattr(provisioning_module, "run_bootstrap", run_stage("bootstrap"))
+    monkeypatch.setattr(provisioning_module, "run_deploy", run_stage("deploy"))
+    monkeypatch.setattr(provisioning_module, "run_verify", run_stage("verify"))
+
+    assert run_provision(settings, root=tmp_path) == "existing"
+    assert phases == ["deploy", "verify"]
+
+
+def test_read_credentials_passes_sudo_password_only_via_stdin(
+    settings: GatewaySettings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    password = "sudo-password"
+    secret = "stored-proxy-password"
+    calls: list[tuple[Sequence[str], Mapping[str, object]]] = []
+
+    def fake_run(command: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=f"DOMAIN=proxy.example.com\nACME_EMAIL=admin@example.com\n"
+            f"NAIVE_USER=stored-user\nNAIVE_PASSWORD={secret}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(provisioning_module.subprocess, "run", fake_run)
+    result = read_credentials(
+        settings,
+        None,
+        root=tmp_path,
+        preflight_runner=_preflight(PreflightMode.MANAGED),
+        password_prompt=lambda: password,
+    )
+    assert result == ("proxy.example.com", "stored-user", secret)
+    command, kwargs = calls[0]
+    assert kwargs["input"] == f"{password}\n"
+    assert password not in " ".join(command)
+    assert secret not in " ".join(command)

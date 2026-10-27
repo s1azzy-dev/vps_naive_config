@@ -1,3 +1,104 @@
 ---
-# Implemented in phase 7.
-[]
+- name: Require safe deployment inputs
+  ansible.builtin.assert:
+    that:
+      - naive_gateway_ref is match('^[A-Za-z0-9][A-Za-z0-9._/-]*$')
+      - "'..' not in naive_gateway_ref"
+      - naive_gateway_domain is match('^[A-Za-z0-9][A-Za-z0-9.-]*[.][A-Za-z0-9.-]+$')
+      - naive_gateway_acme_email is match('^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$')
+      - (naive_gateway_user | length == 0) == (naive_gateway_password | length == 0)
+      - naive_gateway_user is match('^[A-Za-z0-9._~-]*$')
+      - naive_gateway_password is match('^[A-Za-z0-9._~-]*$')
+      - naive_gateway_root is match('^/[A-Za-z0-9/_-]+$')
+      - naive_gateway_config_dir is match('^/[A-Za-z0-9/_-]+$')
+    quiet: true
+  no_log: true
+
+- name: Inspect existing deployment root
+  ansible.builtin.stat:
+    path: "{{ naive_gateway_root }}"
+  register: naive_gateway_root_stat
+
+- name: Refuse an unsafe existing deployment directory
+  ansible.builtin.assert:
+    that:
+      - naive_gateway_root_stat.stat.isdir | default(false)
+      - naive_gateway_root_stat.stat.uid == 0
+      - naive_gateway_root_stat.stat.gid == 0
+      - naive_gateway_root_stat.stat.mode in ['0755', '0750', '0700']
+    quiet: true
+  when: naive_gateway_root_stat.stat.exists
+
+- name: Check for a legacy in-place installation
+  ansible.builtin.stat:
+    path: "{{ naive_gateway_root }}/.git"
+  register: naive_gateway_legacy_checkout
+
+- name: Require explicit migration of a legacy installation
+  ansible.builtin.assert:
+    that: not naive_gateway_legacy_checkout.stat.exists
+    fail_msg: Legacy in-place checkout found; migrate it before using release-based deployment.
+    quiet: true
+
+- name: Install gateway diagnostics and deployment tools
+  ansible.builtin.apt:
+    name: [ca-certificates, curl, dnsutils, git, iproute2, make, openssl]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Inspect host listeners on the gateway ports
+  ansible.builtin.command:
+    argv: [/usr/bin/ss, --no-header, --listening, --tcp, --processes, '( sport = :80 or sport = :443 )']
+  register: naive_gateway_listeners
+  changed_when: false
+
+- name: Refuse conflicting host services
+  ansible.builtin.assert:
+    that: naive_gateway_listeners.stdout_lines | reject('search', '"docker-proxy"') | list | length == 0
+    fail_msg: A host service already listens on TCP 80 or 443.
+    quiet: true
+
+- name: Inspect containers publishing gateway ports
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/docker
+      - ps
+      - --filter
+      - "publish={{ item }}"
+      - --format
+      - >-
+        {{ '{{.Label "com.docker.compose.project"}}/{{.Label "com.docker.compose.service"}}' }}
+  loop: ['80', '443']
+  register: naive_gateway_publishers
+  changed_when: false
+
+- name: Refuse conflicting container publications
+  ansible.builtin.assert:
+    that: item.stdout_lines | difference(['naive-gateway/caddy']) | length == 0
+    fail_msg: A different container already publishes TCP 80 or 443.
+    quiet: true
+  loop: "{{ naive_gateway_publishers.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Create root-owned deployment directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - "{{ naive_gateway_root }}"
+    - "{{ naive_gateway_root }}/releases"
+    - "{{ naive_gateway_config_dir }}"
+
+- name: Prepare the requested source and immutable release
+  ansible.builtin.import_tasks: release.yml
+
+- name: Prepare private candidate credentials
+  ansible.builtin.import_tasks: credentials.yml
+
+- name: Validate and activate the candidate
+  ansible.builtin.import_tasks: activate.yml

@@ -196,15 +196,13 @@ def test_docker_publication_boundary_is_explicit() -> None:
         assert network.get("driver", "bridge") not in {"host", "macvlan", "ipvlan"}
 
 
-def test_transitional_installer_no_longer_mutates_docker_installation() -> None:
-    installer = (ROOT / "install.sh").read_text(encoding="utf-8")
-    assert "install_docker" not in installer
-    assert "download.docker.com" not in installer
-    assert "apt-get install -y docker-ce" not in installer
-    assert "require_docker" in installer
-    assert "/etc/naive-gateway/docker-managed" in installer
-    assert "INPUT_DOMAIN" not in installer
-    assert "INPUT_PASSWORD" not in installer
+def test_transitional_install_and_server_update_are_removed() -> None:
+    assert not (ROOT / "install.sh").exists()
+    assert not (ROOT / "scripts/update-server.sh").exists()
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "\ninstall:" not in makefile
+    assert "\nupdate:" not in makefile
+    assert "\nprovision:" in makefile
 
 
 def test_replaced_controller_shell_files_are_absent() -> None:
@@ -296,7 +294,6 @@ def test_ci_workflow_covers_every_quality_layer() -> None:
 
 def test_remaining_shell_syntax() -> None:
     shell_files = [
-        ROOT / "install.sh",
         ROOT / "tests/smoke-local.sh",
         *(ROOT / "scripts").glob("*.sh"),
     ]

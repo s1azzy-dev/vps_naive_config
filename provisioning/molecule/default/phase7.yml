@@ -1,0 +1,349 @@
+---
+- name: Build the real Caddy binary once on the controller for isolated deployment tests
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    molecule_repo_root: "{{ lookup('ansible.builtin.env', 'MOLECULE_PROJECT_DIRECTORY') }}/.."
+    molecule_image_archive: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/phase7-image.tar"
+    molecule_versions: >-
+      {{ dict(lookup('ansible.builtin.file', molecule_repo_root + '/versions.env').splitlines() |
+         reject('match', '^(#|$)') | map('split', '=', 1)) }}
+  tasks:
+    - name: Build the production Dockerfile with its pinned defaults
+      ansible.builtin.command:
+        argv:
+          - docker
+          - build
+          - --tag
+          - naive-gateway-molecule-caddy
+          - --build-arg
+          - "CADDY_VERSION={{ molecule_versions.CADDY_VERSION }}"
+          - --build-arg
+          - "FORWARDPROXY_COMMIT={{ molecule_versions.FORWARDPROXY_COMMIT }}"
+          - "{{ molecule_repo_root }}"
+      changed_when: true
+
+    - name: Export the test image for the nested Docker daemon
+      ansible.builtin.command:
+        argv: [docker, image, save, --output, "{{ molecule_image_archive }}", naive-gateway-molecule-caddy]
+      changed_when: true
+
+- name: Verify real gateway deployment on disposable Debian with a local issuer
+  hosts: all
+  gather_facts: true
+  vars:
+    molecule_repo_root: "{{ lookup('ansible.builtin.env', 'MOLECULE_PROJECT_DIRECTORY') }}/.."
+    molecule_image_archive: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/phase7-image.tar"
+    naive_gateway_repository: file:///root/phase7-source
+    naive_gateway_ref: "{{ molecule_good_commit.stdout }}"
+    naive_gateway_domain: smoke.localhost
+    naive_gateway_acme_email: ci@example.com
+    naive_gateway_public_acceptance: false
+    molecule_git_environment:
+      GIT_AUTHOR_NAME: Molecule
+      GIT_AUTHOR_EMAIL: molecule@example.com
+      GIT_COMMITTER_NAME: Molecule
+      GIT_COMMITTER_EMAIL: molecule@example.com
+  tasks:
+    - name: Inspect the nested test daemon
+      ansible.builtin.command:
+        argv: [/usr/bin/docker, info]
+      register: molecule_phase7_daemon
+      changed_when: false
+      failed_when: false
+
+    - name: Recover the disposable daemon for a focused Phase 7 retry
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/dockerd
+          - --config-file=/etc/docker/daemon.json
+          - --storage-driver=vfs
+          - --pidfile=/run/molecule-dockerd.pid
+      async: 1800
+      poll: 0
+      changed_when: true
+      when: molecule_phase7_daemon.rc != 0
+
+    - name: Wait for the nested test daemon to respond
+      ansible.builtin.command:
+        argv: [/usr/bin/docker, info]
+      register: molecule_phase7_ready
+      until: molecule_phase7_ready.rc == 0
+      retries: 60
+      delay: 1
+      changed_when: false
+
+    - name: Transfer the real Caddy image to the isolated instance
+      ansible.builtin.copy:
+        src: "{{ molecule_image_archive }}"
+        dest: /root/phase7-image.tar
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Import the Caddy test image into the nested daemon
+      ansible.builtin.command:
+        argv: [/usr/bin/docker, image, load, --input, /root/phase7-image.tar]
+      changed_when: true
+
+    - name: Find only disposable gateway containers from a previous focused run
+      ansible.builtin.command:
+        argv: [/usr/bin/docker, ps, --all, --quiet, --filter, label=com.docker.compose.project=naive-gateway]
+      register: molecule_previous_gateways
+      changed_when: false
+
+    - name: Remove the previous disposable gateway containers
+      ansible.builtin.command:
+        argv: [/usr/bin/docker, rm, --force, "{{ item }}"]
+      loop: "{{ molecule_previous_gateways.stdout_lines }}"
+      changed_when: true
+
+    - name: Reset only the isolated Phase 7 source and deployment state
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /root/phase7-source
+        - /opt/naive-gateway
+        - /etc/naive-gateway/gateway.env
+        - /etc/naive-gateway/gateway.env.pending
+
+    - name: Create the disposable source repository
+      ansible.builtin.file:
+        path: /root/phase7-source
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Copy current uncommitted runtime sources into the isolated repository
+      ansible.builtin.copy:
+        src: "{{ molecule_repo_root }}/{{ item }}{{ '/' if item in ['scripts', 'site'] else '' }}"
+        dest: "/root/phase7-source/{{ item }}"
+        owner: root
+        group: root
+        mode: preserve
+      loop: [compose.yml, versions.env, Makefile, Caddyfile, scripts, site]
+
+    - name: Use the test seed image to avoid rebuilding Caddy inside vfs
+      ansible.builtin.copy:
+        content: "FROM naive-gateway-molecule-caddy\n"
+        dest: /root/phase7-source/Dockerfile
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Replace public ACME only for the isolated test domain
+      ansible.builtin.replace:
+        path: /root/phase7-source/Caddyfile
+        regexp: 'tls \{\$ACME_EMAIL\}'
+        replace: tls internal
+
+    - name: Commit the valid test source
+      ansible.builtin.command:
+        argv: "{{ item }}"
+        chdir: /root/phase7-source
+      environment: "{{ molecule_git_environment }}"
+      loop:
+        - [git, init, --initial-branch=main]
+        - [git, add, .]
+        - [git, commit, --message, Valid local-issuer gateway fixture]
+      changed_when: true
+
+    - name: Record the valid source commit
+      ansible.builtin.command:
+        argv: [git, -C, /root/phase7-source, rev-parse, HEAD]
+      register: molecule_good_commit
+      changed_when: false
+
+    - name: Introduce a genuinely invalid Caddy directive
+      ansible.builtin.lineinfile:
+        path: /root/phase7-source/Caddyfile
+        insertafter: '^\s*encode zstd gzip$'
+        line: "\tinvalid_phase7_directive"
+
+    - name: Commit the invalid candidate
+      ansible.builtin.command:
+        argv: [git, -C, /root/phase7-source, commit, --all, --message, Invalid Caddy fixture]
+      environment: "{{ molecule_git_environment }}"
+      changed_when: true
+
+    - name: Record the invalid source commit
+      ansible.builtin.command:
+        argv: [git, -C, /root/phase7-source, rev-parse, HEAD]
+      register: molecule_bad_commit
+      changed_when: false
+
+    - name: Attempt the first deployment with an invalid Caddy candidate
+      block:
+        - name: Run the production role against the invalid initial source
+          ansible.builtin.include_role:
+            name: naive_gateway
+          vars:
+            naive_gateway_ref: "{{ molecule_bad_commit.stdout }}"
+      rescue:
+        - name: Record rejection of the initial candidate
+          ansible.builtin.set_fact:
+            molecule_initial_rejected: "{{ 'Validate Caddy without' in (ansible_failed_result.msg | default('')) }}"
+
+    - name: Require an actual initial validation failure
+      ansible.builtin.assert:
+        that: molecule_initial_rejected | default(false)
+
+    - name: Record pending credentials saved before the failure
+      ansible.builtin.stat:
+        path: /etc/naive-gateway/gateway.env.pending
+      register: molecule_initial_pending
+      no_log: true
+
+    - name: Require no active runtime file before the first valid deploy
+      ansible.builtin.stat:
+        path: /etc/naive-gateway/gateway.env
+      register: molecule_missing_active
+
+    - name: Verify private credentials were saved without activating an invalid candidate
+      ansible.builtin.assert:
+        that:
+          - molecule_initial_pending.stat.isreg
+          - molecule_initial_pending.stat.mode == '0600'
+          - not molecule_missing_active.stat.exists
+      no_log: true
+
+    - name: Deploy the valid source after the interrupted preparation
+      ansible.builtin.include_role:
+        name: naive_gateway
+
+    - name: Read the first active runtime checksum
+      ansible.builtin.stat:
+        path: /etc/naive-gateway/gateway.env
+      register: molecule_active_env
+      no_log: true
+
+    - name: Require credential preservation across the failed first attempt
+      ansible.builtin.assert:
+        that: molecule_active_env.stat.checksum == molecule_initial_pending.stat.checksum
+      no_log: true
+
+    - name: Read the first running container ID
+      ansible.builtin.command:
+        argv: [/usr/bin/docker, ps, --quiet, --filter, label=com.docker.compose.project=naive-gateway]
+      register: molecule_first_container
+      changed_when: false
+
+    - name: Repeat deployment without changing source or configuration
+      ansible.builtin.include_role:
+        name: naive_gateway
+
+    - name: Require Compose idempotence
+      ansible.builtin.assert:
+        that: not naive_gateway_activation.changed
+
+    - name: Read the container ID after repeated deployment
+      ansible.builtin.command:
+        argv: [/usr/bin/docker, ps, --quiet, --filter, label=com.docker.compose.project=naive-gateway]
+      register: molecule_repeated_container
+      changed_when: false
+
+    - name: Require no unnecessary container replacement
+      ansible.builtin.assert:
+        that:
+          - molecule_first_container.stdout | length > 0
+          - molecule_first_container.stdout == molecule_repeated_container.stdout
+
+    - name: Attempt an invalid update with a changed runtime domain
+      block:
+        - name: Run the production role against the invalid update
+          ansible.builtin.include_role:
+            name: naive_gateway
+          vars:
+            naive_gateway_ref: "{{ molecule_bad_commit.stdout }}"
+            naive_gateway_domain: rejected.localhost
+      rescue:
+        - name: Record rejection of the update
+          ansible.builtin.set_fact:
+            molecule_update_rejected: "{{ 'Validate Caddy without' in (ansible_failed_result.msg | default('')) }}"
+
+    - name: Require an actual update validation failure
+      ansible.builtin.assert:
+        that: molecule_update_rejected | default(false)
+
+    - name: Inspect the runtime env after rejected update
+      ansible.builtin.stat:
+        path: /etc/naive-gateway/gateway.env
+      register: molecule_env_after_rejection
+      no_log: true
+
+    - name: Require the active configuration to survive a rejected update
+      ansible.builtin.assert:
+        that: molecule_env_after_rejection.stat.checksum == molecule_active_env.stat.checksum
+      no_log: true
+
+    - name: Inspect the container after rejected update
+      ansible.builtin.command:
+        argv: [/usr/bin/docker, ps, --quiet, --filter, label=com.docker.compose.project=naive-gateway]
+      register: molecule_container_after_rejection
+      changed_when: false
+
+    - name: Require the running container to survive a rejected update
+      ansible.builtin.assert:
+        that: molecule_container_after_rejection.stdout == molecule_first_container.stdout
+
+    - name: Restore a valid Caddy source
+      ansible.builtin.command:
+        argv: [git, -C, /root/phase7-source, checkout, "{{ molecule_good_commit.stdout }}", --, Caddyfile]
+      changed_when: true
+
+    - name: Introduce a new reviewed website revision
+      ansible.builtin.lineinfile:
+        path: /root/phase7-source/site/index.html
+        line: '<!-- phase7 updated release -->'
+
+    - name: Commit the new valid source
+      ansible.builtin.command:
+        argv: [git, -C, /root/phase7-source, commit, --all, --message, Updated valid gateway fixture]
+      environment: "{{ molecule_git_environment }}"
+      changed_when: true
+
+    - name: Record the updated source commit
+      ansible.builtin.command:
+        argv: [git, -C, /root/phase7-source, rev-parse, HEAD]
+      register: molecule_updated_commit
+      changed_when: false
+
+    - name: Deploy the updated branch after a failed attempt
+      ansible.builtin.include_role:
+        name: naive_gateway
+      vars:
+        naive_gateway_ref: main
+
+    - name: Verify the updated website over actual local HTTPS
+      ansible.builtin.command:
+        argv: [curl, -kfsS, --resolve, 'smoke.localhost:443:127.0.0.1', 'https://smoke.localhost/']
+      register: molecule_updated_site
+      changed_when: false
+
+    - name: Require the new source to be active
+      ansible.builtin.assert:
+        that:
+          - "'phase7 updated release' in molecule_updated_site.stdout"
+          - naive_gateway_commit.stdout == molecule_updated_commit.stdout
+
+    - name: Inspect the final runtime env
+      ansible.builtin.stat:
+        path: /etc/naive-gateway/gateway.env
+      register: molecule_final_env
+      no_log: true
+
+    - name: Require credentials to survive source updates
+      ansible.builtin.assert:
+        that: molecule_final_env.stat.checksum == molecule_active_env.stat.checksum
+      no_log: true
+
+    - name: Record completed deployment boundary assertions for testinfra
+      ansible.builtin.copy:
+        content: "{{ molecule_updated_commit.stdout }}\n"
+        dest: /root/.molecule-phase4/gateway-deployment-verified
+        owner: root
+        group: root
+        mode: "0600"

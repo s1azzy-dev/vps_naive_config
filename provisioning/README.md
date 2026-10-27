@@ -5,7 +5,40 @@
 validate-before-reload, точный UFW/`DOCKER-USER` allowlist и безопасные Docker
 publication defaults. Полные Gates 4–6 остаются открытыми до reconnect,
 lockout-negative, systemd/reboot и внешнего port-scan E2E на disposable VM/VPS.
-Gateway deployment и `verify` ещё являются каркасом следующих фаз плана.
+Gateway deployment реализуется ролью `naive_gateway` и командой `make deploy`.
+`make provision` объединяет bootstrap, deploy и `verify`; `make credentials`
+выводит действующие credentials в интерактивном терминале.
+
+## Gateway deployment
+
+Controller выполняет read-only preflight, требует managed SSH и запрашивает
+текущий sudo password. Ansible проверяет sudo с новым timestamp до изменений,
+проверяет Docker/порты и получает указанный source ref. Секреты передаются через
+тот же inherited pipe, что и в bootstrap.
+
+`/opt/naive-gateway/repository` служит source checkout. Активные bind mounts
+указывают на отдельный snapshot `releases/<commit>`; `current` меняется после
+успешной приёмки. Кандидат получает собственный image tag. До активации выполняются
+проверка Compose boundary, build и `caddy validate` без production certificate
+volumes. Существующий сервис при ошибке этих проверок не заменяется.
+
+`gateway.env.pending` хранит подготовленные credentials с mode `0600`, чтобы
+повтор после прерывания не генерировал их заново. Существующий `gateway.env` имеет
+приоритет; явная пара из controller config заменяет credentials. После validation
+runtime env записывается атомарно, Compose ожидает health, затем выполняются
+public HTTPS и `check-server.sh`. При ошибке активации надо исправить причину и
+повторить `make deploy`; автоматического rollback всего deployment пока нет.
+
+Molecule использует отдельный Git fixture runtime-файлов этапа 7, настоящий
+production Caddy image и local issuer. Он проверяет failed-first retry,
+идемпотентность, отклонение invalid Caddy update, сохранение credentials и смену
+source ref. Это не подтверждает public ACME и внешний acceptance.
+
+`make verify` проверяет SSH, UFW, Docker ingress, права runtime файла, состояние
+службы, commit/ref, фактические опубликованные порты и HTTPS/proxy; конфигурацию
+сервера он не меняет. Для получения credentials controller читает runtime env
+по SSH под sudo: пароль передаётся только через stdin, а результат печатается
+только в интерактивном терминале. Изменения этапов 8–11 ещё не прошли gates.
 
 ## Граница firewall
 

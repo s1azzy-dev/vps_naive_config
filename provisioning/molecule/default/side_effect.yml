@@ -168,7 +168,7 @@
           - --config-file=/etc/docker/daemon.json
           - --storage-driver=vfs
           - --pidfile=/run/molecule-dockerd.pid
-      async: 600
+      async: 1800
       poll: 0
       changed_when: true
 
@@ -260,7 +260,7 @@
           - --config-file=/etc/docker/daemon.json
           - --storage-driver=vfs
           - --pidfile=/run/molecule-dockerd.pid
-      async: 600
+      async: 1800
       poll: 0
       changed_when: true
 
@@ -356,3 +356,6 @@
             mode: "0600"
             modification_time: preserve
             access_time: preserve
+
+- name: Exercise gateway deployment and recovery
+  ansible.builtin.import_playbook: phase7.yml

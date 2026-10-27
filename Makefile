@@ -2,7 +2,8 @@
 SHELL := /bin/sh
 CONFIG_FILE ?= .env
 
-COMPOSE := docker compose --env-file versions.env --env-file .env
+RUNTIME_ENV ?= $(if $(wildcard .runtime-env-path),$(shell cat .runtime-env-path),/etc/naive-gateway/gateway.env)
+COMPOSE := env -u DOMAIN -u ACME_EMAIL -u NAIVE_USER -u NAIVE_PASSWORD -u CADDY_VERSION -u FORWARDPROXY_COMMIT docker compose --env-file versions.env --env-file "$(RUNTIME_ENV)" -f compose.yml $(if $(wildcard deployment.yml),-f deployment.yml)
 VENV_DIR ?= .venv
 PYTHON ?= python3
 UV_VERSION := 0.12.5
@@ -20,9 +21,9 @@ ANSIBLE_PLAYBOOK := $(VENV_BIN)/ansible-playbook
 ANSIBLE_LINT := $(VENV_BIN)/ansible-lint
 MOLECULE := $(VENV_BIN)/molecule
 ANSIBLE_ENV := ANSIBLE_CONFIG="$(ANSIBLE_CONFIG_FILE)" ANSIBLE_HOME="$(CURDIR)/.ansible" ANSIBLE_LOCAL_TEMP="$(CURDIR)/.ansible/tmp"
-SHELL_FILES := install.sh $(wildcard scripts/*.sh) tests/smoke-local.sh
+SHELL_FILES := $(wildcard scripts/*.sh) tests/smoke-local.sh
 
-.PHONY: help init tooling tooling-check lint ansible-check molecule check-config preflight bootstrap install build up down restart logs status check update rotate-credentials backup validate test
+.PHONY: help init tooling tooling-check lint ansible-check molecule check-config preflight bootstrap deploy provision verify credentials restart logs status check rotate-credentials backup validate test
 
 help:
 	@printf '%s\n' \
@@ -33,21 +34,24 @@ help:
 		'  make check-config  Validate local .env without connecting to a VPS' \
 		'  make preflight     Read-only DNS, TCP, host-key, and SSH readiness checks' \
 		'  make bootstrap     Create the user, harden SSH, and configure UFW' \
+		'  make deploy        Deploy and check the gateway on a managed VPS' \
+		'  make provision     Bootstrap if needed, deploy, verify and display credentials' \
+		'  make verify        Verify SSH, firewall, Docker and gateway without reconfiguration' \
+		'  make credentials   Display current credentials in an interactive terminal' \
 		'' \
 		'Current server/runtime commands:' \
-		'  make install       Run the transitional shell installer' \
 		'  make status        Show the Caddy container status' \
 		'  make check         Run the server acceptance checks' \
 		'  make logs          Follow Caddy logs' \
+		'  make restart       Restart the running Caddy service' \
+		'  make validate      Validate Compose and Caddy without replacing the service' \
 		'  make backup        Create a credentials-bearing backup' \
 		'  make rotate-credentials  Rotate credentials with rollback' \
-		'  make update        Run the transitional server-side update' \
 		'' \
 		'Project checks:' \
 		'  make lint          Run Ruff, mypy, shell, and Ansible static checks' \
 		'  make ansible-check Run Ansible syntax and production lint checks' \
 		'  make molecule      Run isolated bootstrap/SSH/UFW/Docker role tests' \
-		'  make validate      Validate Compose and Caddy configuration' \
 		'  make test          Run the pytest suite'
 
 init:
@@ -108,17 +112,17 @@ preflight: tooling-check
 bootstrap: tooling-check
 	@"$(CONTROLLER)" bootstrap --config "$(CONFIG_FILE)"
 
-install:
-	./install.sh
+deploy: tooling-check
+	@"$(CONTROLLER)" deploy --config "$(CONFIG_FILE)"
 
-build:
-	$(COMPOSE) build
+provision: tooling-check
+	@"$(CONTROLLER)" provision --config "$(CONFIG_FILE)"
 
-up:
-	$(COMPOSE) up -d
+verify: tooling-check
+	@"$(CONTROLLER)" verify --config "$(CONFIG_FILE)"
 
-down:
-	$(COMPOSE) down
+credentials: tooling-check
+	@"$(CONTROLLER)" credentials --config "$(CONFIG_FILE)"
 
 restart:
 	$(COMPOSE) restart caddy
@@ -132,9 +136,6 @@ status:
 check:
 	./scripts/check-server.sh
 
-update:
-	./scripts/update-server.sh
-
 rotate-credentials:
 	./scripts/rotate-credentials.sh
 
@@ -143,7 +144,10 @@ backup:
 
 validate:
 	$(COMPOSE) config --quiet
-	$(COMPOSE) run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+	@image="$$($(COMPOSE) config --images)"; \
+		docker run --rm --network none --env-file "$(RUNTIME_ENV)" \
+		--mount "type=bind,src=$(CURDIR)/Caddyfile,dst=/etc/caddy/Caddyfile,readonly" \
+		"$$image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
 test: tooling-check
 	@"$(VENV_BIN)/pytest"

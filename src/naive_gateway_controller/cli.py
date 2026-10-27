@@ -10,14 +10,29 @@ from pathlib import Path
 from naive_gateway_controller.config import load_settings
 from naive_gateway_controller.errors import ControllerError
 from naive_gateway_controller.preflight import run_preflight
-from naive_gateway_controller.provisioning import BootstrapOutcome, run_bootstrap
+from naive_gateway_controller.provisioning import (
+    BootstrapOutcome,
+    read_credentials,
+    run_bootstrap,
+    run_deploy,
+    run_provision,
+    run_verify,
+)
 from naive_gateway_controller.tooling import check_tooling, install_collections, project_root
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gateway-controller")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("check-config", "preflight", "bootstrap"):
+    for command in (
+        "check-config",
+        "preflight",
+        "bootstrap",
+        "deploy",
+        "provision",
+        "verify",
+        "credentials",
+    ):
         subparser = subparsers.add_parser(command)
         subparser.add_argument("--config", type=Path, default=Path(".env"))
     subparsers.add_parser("tooling-check")
@@ -61,6 +76,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_preflight(arguments.config)
         elif arguments.command == "bootstrap":
             _print_bootstrap(arguments.config)
+        elif arguments.command == "deploy":
+            settings = load_settings(arguments.config)
+            run_deploy(settings)
+            print(f"Deploy: PASS\nWebsite: https://{settings.domain}\n")
+        elif arguments.command == "verify":
+            run_verify(load_settings(arguments.config))
+            print("Verification: PASS")
+        elif arguments.command in ("provision", "credentials"):
+            if not sys.stdout.isatty():
+                raise ControllerError("credentials are displayed only in an interactive terminal")
+            settings = load_settings(arguments.config)
+            password = run_provision(settings) if arguments.command == "provision" else None
+            domain, user, secret = read_credentials(settings, password)
+            if arguments.command == "provision":
+                print("Verification: PASS\nProvisioning: PASS")
+            print(f"Endpoint: https://{domain}:443\nUser: {user}\nPassword: {secret}")
         elif arguments.command == "tooling-check":
             check_tooling()
         elif arguments.command == "install-collections":

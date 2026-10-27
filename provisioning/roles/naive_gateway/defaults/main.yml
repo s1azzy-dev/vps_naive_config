@@ -1,0 +1,6 @@
+---
+naive_gateway_root: /opt/naive-gateway
+naive_gateway_config_dir: /etc/naive-gateway
+naive_gateway_user: ""
+naive_gateway_password: ""
+naive_gateway_public_acceptance: true

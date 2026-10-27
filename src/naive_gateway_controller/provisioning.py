@@ -1,10 +1,11 @@
-"""Secret-safe controller orchestration for the Phase 4 bootstrap playbook."""
+"""Secret-safe controller orchestration for bootstrap and deployment."""
 
 from __future__ import annotations
 
 import getpass
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -17,7 +18,7 @@ from typing import Protocol
 from passlib.hash import sha512_crypt
 
 from naive_gateway_controller.config import GatewaySettings
-from naive_gateway_controller.errors import ProvisioningError
+from naive_gateway_controller.errors import ControllerError, ProvisioningError
 from naive_gateway_controller.preflight import (
     PreflightMode,
     PreflightReport,
@@ -100,7 +101,7 @@ def execute_ansible(
     except (BrokenPipeError, OSError) as error:
         if process is not None:
             process.wait()
-        raise ProvisioningError("failed to execute the bootstrap playbook") from error
+        raise ProvisioningError("failed to execute the Ansible playbook") from error
     finally:
         if read_fd >= 0:
             os.close(read_fd)
@@ -121,6 +122,208 @@ def _ssh_common_args(known_hosts_file: Path) -> str:
         "-o ControlPath=none",
     )
     return " ".join(options)
+
+
+def prompt_current_sudo_password() -> str:
+    """Read the existing managed-user password without echo or confirmation."""
+    password = getpass.getpass("Current VPS_USER sudo password: ")
+    if not password:
+        raise ProvisioningError("sudo password must not be empty")
+    return password
+
+
+def run_deploy(
+    settings: GatewaySettings,
+    *,
+    root: Path | None = None,
+    password_prompt: PasswordPrompt = prompt_current_sudo_password,
+    preflight_runner: PreflightRunner = run_preflight,
+    ansible_executor: AnsibleExecutor = execute_ansible,
+) -> None:
+    """Deploy only over managed SSH; all remote changes belong to Ansible."""
+    root = root or project_root()
+    known_hosts_file = (root / "provisioning/known_hosts").resolve()
+    report = preflight_runner(settings, known_hosts_file)
+    if report.mode is not PreflightMode.MANAGED:
+        raise ProvisioningError("deploy requires a managed host; run make bootstrap first")
+    variables: dict[str, object] = {
+        "ansible_host": settings.vps_host,
+        "ansible_port": settings.vps_port,
+        "ansible_user": settings.vps_user,
+        "ansible_ssh_private_key_file": str(settings.ssh_private_key),
+        "ansible_ssh_common_args": _ssh_common_args(known_hosts_file),
+        "ansible_become_password": password_prompt(),
+        "docker_managed_user": settings.vps_user,
+        "naive_gateway_repository": settings.gateway_repository,
+        "naive_gateway_ref": settings.gateway_ref,
+        "naive_gateway_domain": settings.domain,
+        "naive_gateway_acme_email": settings.acme_email,
+        "naive_gateway_user": settings.naive_user or "",
+        "naive_gateway_password": (
+            settings.naive_password.get_secret_value() if settings.naive_password else ""
+        ),
+    }
+    command = [
+        str(Path(sys.prefix) / "bin/ansible-playbook"),
+        "--inventory",
+        "naive_gateway,",
+        str(root / "provisioning/playbooks/deploy.yml"),
+    ]
+    if ansible_executor(command, variables, ansible_environment(root)) != 0:
+        raise ProvisioningError("deploy failed; resolve the reported stage and rerun make deploy")
+
+
+def run_verify(
+    settings: GatewaySettings,
+    *,
+    root: Path | None = None,
+    password_prompt: PasswordPrompt = prompt_current_sudo_password,
+    preflight_runner: PreflightRunner = run_preflight,
+    ssh_probe: SSHProbe = probe_ssh,
+    auth_probe: SSHAuthProbe = probe_ssh_auth_methods,
+    ansible_executor: AnsibleExecutor = execute_ansible,
+) -> None:
+    """Check access and host/application state without changing host configuration."""
+    root = root or project_root()
+    known_hosts = (root / "provisioning/known_hosts").resolve()
+    report = preflight_runner(settings, known_hosts)
+    if report.mode is not PreflightMode.MANAGED:
+        raise ProvisioningError("verification requires managed SSH; run make bootstrap")
+    if _probe_key(settings, known_hosts, "root", ssh_probe).status is not SSHStatus.AUTH_FAILED:
+        raise ProvisioningError("root key login was not confirmed disabled")
+    if not _probe_auth(settings, known_hosts, auth_probe).password_methods_disabled:
+        raise ProvisioningError("password or keyboard-interactive SSH was not confirmed disabled")
+    print("DNS: PASS\nSSH access and authentication: PASS", flush=True)
+    variables: dict[str, object] = {
+        "ansible_host": settings.vps_host,
+        "ansible_port": settings.vps_port,
+        "ansible_user": settings.vps_user,
+        "ansible_ssh_private_key_file": str(settings.ssh_private_key),
+        "ansible_ssh_common_args": _ssh_common_args(known_hosts),
+        "ansible_become_password": password_prompt(),
+        "verify_user": settings.vps_user,
+        "verify_ssh_port": settings.vps_port,
+        "verify_domain": settings.domain,
+        "verify_acme_email": settings.acme_email,
+        "verify_repository": settings.gateway_repository,
+        "verify_ref": settings.gateway_ref,
+        "verify_naive_user": settings.naive_user or "",
+        "verify_naive_password": (
+            settings.naive_password.get_secret_value() if settings.naive_password else ""
+        ),
+    }
+    command = [
+        str(Path(sys.prefix) / "bin/ansible-playbook"),
+        "--inventory",
+        "naive_gateway,",
+        str(root / "provisioning/playbooks/verify.yml"),
+    ]
+    if ansible_executor(command, variables, ansible_environment(root)) != 0:
+        raise ProvisioningError(
+            "verification failed; inspect the failed layer and rerun make verify"
+        )
+
+
+def read_credentials(
+    settings: GatewaySettings,
+    password: str | None,
+    *,
+    root: Path | None = None,
+    preflight_runner: PreflightRunner = run_preflight,
+    password_prompt: PasswordPrompt = prompt_current_sudo_password,
+) -> tuple[str, str, str]:
+    """Read runtime credentials through SSH/sudo with the password only on stdin."""
+    root = root or project_root()
+    known_hosts = (root / "provisioning/known_hosts").resolve()
+    if preflight_runner(settings, known_hosts).mode is not PreflightMode.MANAGED:
+        raise ProvisioningError("credentials require managed SSH; run make bootstrap")
+    if password is None:
+        password = password_prompt()
+    remote_command = shlex.join(
+        ["sudo", "-S", "-k", "-p", "", "/usr/bin/cat", "/etc/naive-gateway/gateway.env"],
+    )
+    command = [
+        "ssh",
+        *shlex.split(_ssh_common_args(known_hosts)),
+        "-T",
+        "-p",
+        str(settings.vps_port),
+        "-i",
+        str(settings.ssh_private_key),
+        f"{settings.vps_user}@{settings.vps_host}",
+        remote_command,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            input=f"{password}\n",
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ProvisioningError("unable to read credentials; rerun make credentials") from error
+    if result.returncode != 0:
+        raise ProvisioningError(
+            "unable to read credentials; check SSH and sudo, then rerun make credentials"
+        )
+    entries = [line.split("=", 1) for line in result.stdout.splitlines()]
+    if any(len(entry) != 2 for entry in entries):
+        raise ProvisioningError("runtime credentials file has an invalid format")
+    values = {entry[0]: entry[1] for entry in entries}
+    if len(entries) != 4 or set(values) != {"DOMAIN", "ACME_EMAIL", "NAIVE_USER", "NAIVE_PASSWORD"}:
+        raise ProvisioningError("runtime credentials file has an invalid format")
+    if not re.fullmatch(r"[A-Za-z0-9.-]+", values["DOMAIN"]) or any(
+        re.fullmatch(r"[A-Za-z0-9._~-]+", values[key]) is None
+        for key in ("NAIVE_USER", "NAIVE_PASSWORD")
+    ):
+        raise ProvisioningError("runtime credentials file has invalid values")
+    return values["DOMAIN"], values["NAIVE_USER"], values["NAIVE_PASSWORD"]
+
+
+def run_provision(settings: GatewaySettings, *, root: Path | None = None) -> str:
+    """Orchestrate bootstrap, deployment and verification using one in-memory password."""
+    root = root or project_root()
+    known_hosts = (root / "provisioning/known_hosts").resolve()
+    try:
+        report = run_preflight(settings, known_hosts)
+    except ControllerError as error:
+        raise ProvisioningError(f"preflight failed; resume with make preflight: {error}") from error
+    bootstrap_needed = report.mode is PreflightMode.BOOTSTRAP
+    if not bootstrap_needed:
+        root_status = _probe_key(settings, known_hosts, "root", probe_ssh).status
+        if root_status not in (SSHStatus.OK, SSHStatus.AUTH_FAILED):
+            raise ProvisioningError("cannot determine whether root SSH is disabled")
+        auth_methods = _probe_auth(settings, known_hosts, probe_ssh_auth_methods)
+        if auth_methods.status is not SSHStatus.AUTH_FAILED or not auth_methods.offer_observed:
+            raise ProvisioningError(
+                "cannot determine the managed user's SSH authentication methods"
+            )
+        bootstrap_needed = root_status is SSHStatus.OK or not auth_methods.password_methods_disabled
+    if bootstrap_needed:
+        password = prompt_sudo_password()
+        print("Bootstrap: starting", flush=True)
+        try:
+            run_bootstrap(settings, root=root, password_prompt=lambda: password)
+        except ControllerError as error:
+            raise ProvisioningError(
+                f"bootstrap failed; resume with make bootstrap: {error}"
+            ) from error
+    else:
+        password = prompt_current_sudo_password()
+        print("Bootstrap: SKIP (managed SSH is already hardened)", flush=True)
+    print("Deploy: starting", flush=True)
+    try:
+        run_deploy(settings, root=root, password_prompt=lambda: password)
+    except ControllerError as error:
+        raise ProvisioningError(f"deploy failed; resume with make deploy: {error}") from error
+    print("Deploy: PASS\nVerification: starting", flush=True)
+    try:
+        run_verify(settings, root=root, password_prompt=lambda: password)
+    except ControllerError as error:
+        raise ProvisioningError(f"verification failed; resume with make verify: {error}") from error
+    return password
 
 
 def _probe_key(
