@@ -8,15 +8,8 @@
     quiet: true
   no_log: true
 
-- name: Detect whether the managed account already exists
-  ansible.builtin.command:
-    argv:
-      - /usr/bin/getent
-      - passwd
-      - "{{ user_name }}"
-  register: user_existing_account
-  changed_when: false
-  failed_when: user_existing_account.rc not in [0, 2]
+- name: Refuse unmanaged account adoption before changing groups or keys
+  ansible.builtin.import_tasks: ownership.yml
 
 - name: Ensure the managed primary group exists
   ansible.builtin.group:
@@ -37,6 +30,22 @@
     update_password: on_create
     state: present
   no_log: true
+
+- name: Create the private account management directory
+  ansible.builtin.file:
+    path: /etc/naive-gateway
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Mark the newly created account before subsequent recoverable tasks
+  ansible.builtin.copy:
+    content: "{{ user_name }}\n"
+    dest: "/etc/naive-gateway/user-managed-{{ user_name }}"
+    owner: root
+    group: root
+    mode: "0600"
 
 - name: Create the managed SSH directory
   ansible.builtin.file:

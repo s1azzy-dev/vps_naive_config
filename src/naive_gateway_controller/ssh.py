@@ -114,10 +114,15 @@ def _classify_result(completed: subprocess.CompletedProcess[str]) -> SSHStatus:
     ):
         return SSHStatus.HOST_KEY_CHANGED
     if re.search(
-        r"Permission denied|incorrect passphrase|sign_and_send_pubkey|no mutual signature algorithm",
+        r"incorrect passphrase|sign_and_send_pubkey|no mutual signature algorithm|"
+        r"Load key .*:|UNPROTECTED PRIVATE KEY FILE|bad permissions|invalid format|"
+        r"Identity file .* not accessible|no such identity|identity_sign:|Bad owner or permissions|"
+        r"no matching (?:host key|key exchange|cipher)|Bad configuration option",
         stderr,
         re.I,
     ):
+        return SSHStatus.LOCAL_ERROR
+    if re.search(r"Permission denied\s*\([a-z0-9,@_-]+\)\.?\s*$", stderr, re.I | re.M):
         return SSHStatus.AUTH_FAILED
     return SSHStatus.CONNECTION_FAILED
 
@@ -145,6 +150,7 @@ def probe_ssh(
     before = _fingerprint(known_hosts_file)
     command = [
         ssh_binary,
+        "-4",
         "-F",
         "/dev/null",
         "-T",
@@ -217,6 +223,7 @@ def probe_ssh_auth_methods(
         return SSHAuthMethodsResult(SSHStatus.LOCAL_ERROR, (), False)
     command = [
         ssh_binary,
+        "-4",
         "-F",
         "/dev/null",
         "-T",

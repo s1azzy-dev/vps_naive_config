@@ -6,6 +6,8 @@
     bootstrap_apply_user: true
     bootstrap_controller_epoch: "{{ now().timestamp() | int }}"
     bootstrap_user_name: root
+    bootstrap_test_fixture: true
+    ssh_policy_test_connection: ['127.0.0.1', '12345', '127.0.0.1', '22']
     molecule_managed_user: molecule_admin
     molecule_public_key: >-
       ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOZGc3eD7DMtNLskGutOfXw7ZmiK4B9Hl0+7wYs2qIib molecule-phase4
@@ -14,7 +16,7 @@
       {{ lookup('ansible.builtin.password', molecule_password_file, length=32) }}
     molecule_password_hash: >-
       {{ lookup('ansible.builtin.password', molecule_password_file, length=32, encrypt='sha512_crypt') }}
-    ansible_become_password: "{{ molecule_password }}"
+    managed_become_password: "{{ molecule_password }}"
     user_name: "{{ molecule_managed_user }}"
     user_password_hash: "{{ molecule_password_hash }}"
     user_authorized_key: "{{ molecule_public_key }}"
@@ -75,6 +77,7 @@
   gather_facts: true
   vars:
     docker_manage_service: false
+    docker_test_fixture: true
     docker_managed_user: molecule_admin
   roles:
     - role: docker

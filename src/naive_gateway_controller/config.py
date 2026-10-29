@@ -14,6 +14,7 @@ from pydantic import Field, SecretStr, ValidationError, field_validator, model_v
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from naive_gateway_controller.errors import ConfigError
+from naive_gateway_controller.repository import validate_repository_url
 
 _HOST_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
 _LINUX_USER = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
@@ -122,9 +123,20 @@ class GatewaySettings(BaseSettings):
     def valid_vps_host(cls, value: str) -> str:
         """Accept an IP literal or a syntactically safe DNS hostname."""
         try:
-            return str(ipaddress.ip_address(value))
+            address = ipaddress.ip_address(value)
         except ValueError:
             return _validate_hostname(value, require_dot=False)
+        if address.version != 4:
+            raise ValueError("MVP requires an IPv4 address or hostname with IPv4")
+        return str(address)
+
+    @field_validator("vps_port")
+    @classmethod
+    def non_gateway_ssh_port(cls, value: int) -> int:
+        """Reserve the public gateway ports before any VPS interaction."""
+        if value in {80, 443}:
+            raise ValueError("SSH port must not conflict with gateway TCP ports 80 and 443")
+        return value
 
     @field_validator("vps_bootstrap_user", "vps_user")
     @classmethod
@@ -152,11 +164,7 @@ class GatewaySettings(BaseSettings):
     @classmethod
     def valid_repository(cls, value: str) -> str:
         """Allow HTTPS, ssh://, or Git's SCP-like SSH repository syntax."""
-        if any(character.isspace() for character in value):
-            raise ValueError("must be a non-empty URL without whitespace")
-        if not (value.startswith(("https://", "ssh://")) or re.match(r"^git@[^:]+:.+", value)):
-            raise ValueError("must use https://, ssh://, or Git SSH syntax")
-        return value
+        return validate_repository_url(value)
 
     @field_validator("gateway_ref")
     @classmethod

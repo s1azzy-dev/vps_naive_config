@@ -1,0 +1,212 @@
+---
+- name: Exercise real autonomous backup restore and credential rollback
+  hosts: all
+  gather_facts: false
+  vars:
+    molecule_trust: /root/.molecule-phase4/local-root.crt
+    naive_gateway_repository: file:///root/phase7-source
+    naive_gateway_ref: "{{ molecule_updated_commit.stdout }}"
+    naive_gateway_domain: smoke.localhost
+    naive_gateway_acme_email: ci@example.com
+    naive_gateway_public_acceptance: false
+  environment:
+    SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+    CURL_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+  tasks:
+    - name: Resolve the isolated endpoint without public DNS
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        line: 127.0.0.1 smoke.localhost
+        unsafe_writes: true
+
+    - name: Read the accepted fixture container
+      ansible.builtin.command:
+        argv: [docker, ps, --quiet, --filter, label=com.docker.compose.project=naive-gateway]
+      register: molecule_backup_container
+      changed_when: false
+
+    - name: Trust the isolated issuer for real acceptance commands
+      ansible.builtin.command:
+        argv: [docker, cp, "{{ molecule_backup_container.stdout }}:/data/caddy/pki/authorities/local/root.crt", "{{ molecule_trust }}"]
+      changed_when: true
+
+    - name: Add the fixture issuer to the disposable system trust store
+      ansible.builtin.copy:
+        src: "{{ molecule_trust }}"
+        dest: /usr/local/share/ca-certificates/molecule-root.crt
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Refresh only the disposable host CA trust
+      ansible.builtin.command: /usr/sbin/update-ca-certificates
+      changed_when: true
+
+    - name: Run the production acceptance script with the fixture CA
+      ansible.builtin.command:
+        argv: [/opt/naive-gateway/current/scripts/check-server.sh]
+      changed_when: false
+      no_log: true
+      register: molecule_production_acceptance
+      failed_when: false
+
+    - name: Require actual acceptance without exposing its secret inputs
+      ansible.builtin.assert:
+        that: molecule_production_acceptance.rc == 0
+        fail_msg: >-
+          Production check failed at:
+          {{ molecule_production_acceptance.stdout | regex_findall('Checking [A-Za-z0-9 ,./()-]+') | last | default('startup') }}
+        quiet: true
+
+    - name: Create a real autonomous backup
+      ansible.builtin.command:
+        argv: [/opt/naive-gateway/current/scripts/backup.sh]
+      register: molecule_autonomous_backup
+      changed_when: true
+
+    - name: Record the produced backup path
+      ansible.builtin.set_fact:
+        molecule_backup_path: "{{ molecule_autonomous_backup.stdout_lines[0].split(': ', 1)[1] }}"
+
+    - name: Inspect backup permissions
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: ["{{ molecule_backup_path }}", /var/backups/naive-gateway]
+      register: molecule_backup_permissions
+      no_log: true
+
+    - name: Require private backup ownership and permissions
+      ansible.builtin.assert:
+        that:
+          - molecule_backup_permissions.results[0].stat.mode == '0600'
+          - molecule_backup_permissions.results[1].stat.mode == '0700'
+          - molecule_backup_permissions.results[0].stat.uid == 0
+          - molecule_backup_permissions.results[0].stat.gid == 0
+        quiet: true
+      no_log: true
+
+    - name: Stop the disposable gateway before restoring to an empty runtime
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/usr/bin/docker', 'compose', '--project-name', 'naive-gateway',
+          '--env-file', '/opt/naive-gateway/current/versions.env', '--env-file', '/etc/naive-gateway/gateway.env',
+          '-f', '/opt/naive-gateway/current/compose.yml', '-f', '/opt/naive-gateway/current/deployment.yml', 'down'] }}
+      changed_when: true
+      no_log: true
+
+    - name: Remove only backed-up disposable volumes and image
+      ansible.builtin.command:
+        argv: "{{ item }}"
+      loop:
+        - [docker, volume, rm, naive-gateway_caddy_data, naive-gateway_caddy_config]
+        - [docker, image, rm, "naive-gateway-caddy:git-{{ molecule_updated_commit.stdout }}"]
+      changed_when: true
+
+    - name: Make source Git unavailable during restore
+      ansible.builtin.command:
+        argv: [/bin/mv, /root/phase7-source, /root/phase7-source-offline]
+      changed_when: true
+
+    - name: Restore the backup into a separate empty runtime using real Docker
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - /opt/naive-gateway/current/scripts/restore_runtime.py
+          - "{{ molecule_backup_path }}"
+          - /opt/naive-restored
+          - /etc/naive-restored
+          - smoke.localhost
+      changed_when: true
+      no_log: true
+
+    - name: Inspect restored credentials
+      ansible.builtin.stat:
+        path: /etc/naive-restored/gateway.env
+      register: molecule_restored_env
+      no_log: true
+
+    - name: Require credentials to survive autonomous restore
+      ansible.builtin.assert:
+        that: molecule_restored_env.stat.checksum == molecule_final_env.stat.checksum
+        quiet: true
+      no_log: true
+
+    - name: Rotate credentials with the real service and acceptance checks
+      ansible.builtin.command:
+        argv: [/opt/naive-restored/current/scripts/rotate-credentials.sh]
+      changed_when: true
+      no_log: true
+
+    - name: Inspect successfully rotated credentials
+      ansible.builtin.stat:
+        path: /etc/naive-restored/gateway.env
+      register: molecule_rotated_env
+      no_log: true
+
+    - name: Require an actual credential rotation
+      ansible.builtin.assert:
+        that: molecule_rotated_env.stat.checksum != molecule_restored_env.stat.checksum
+        quiet: true
+      no_log: true
+
+    - name: Preserve the acceptance script before failure injection
+      ansible.builtin.copy:
+        src: /opt/naive-restored/current/scripts/check-server.sh
+        dest: /root/.molecule-phase4/check-server.saved
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Force acceptance failure only in the disposable restored release
+      ansible.builtin.copy:
+        content: "#!/bin/sh\nexit 1\n"
+        dest: /opt/naive-restored/current/scripts/check-server.sh
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Attempt a rotation that must fail and roll back
+      ansible.builtin.command:
+        argv: [/opt/naive-restored/current/scripts/rotate-credentials.sh]
+      register: molecule_failed_rotation
+      failed_when: molecule_failed_rotation.rc == 0
+      changed_when: false
+      no_log: true
+
+    - name: Restore the actual acceptance script after failure injection
+      ansible.builtin.copy:
+        src: /root/.molecule-phase4/check-server.saved
+        dest: /opt/naive-restored/current/scripts/check-server.sh
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Inspect credentials after the failed rotation
+      ansible.builtin.stat:
+        path: /etc/naive-restored/gateway.env
+      register: molecule_rollback_env
+      no_log: true
+
+    - name: Require preservation of the last working credentials
+      ansible.builtin.assert:
+        that: molecule_rollback_env.stat.checksum == molecule_rotated_env.stat.checksum
+        quiet: true
+      no_log: true
+
+    - name: Verify the actual proxy after credential rollback
+      ansible.builtin.command:
+        argv: [/opt/naive-restored/current/scripts/check-server.sh]
+      changed_when: false
+      no_log: true
+
+    - name: Restore source Git for the final fixture state
+      ansible.builtin.command:
+        argv: [/bin/mv, /root/phase7-source-offline, /root/phase7-source]
+      changed_when: true
+
+    - name: Reconcile the original deployment for final testinfra assertions
+      ansible.builtin.include_role:
+        name: naive_gateway

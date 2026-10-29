@@ -9,6 +9,8 @@ source "$SCRIPT_DIR/common.sh"
 load_project_env
 require_command openssl
 require_command docker
+[[ ! -e $(dirname -- "$RUNTIME_ENV")/deployment-recovery ]] || \
+  die "recover the unfinished deployment before rotating credentials"
 
 old_env=$(mktemp "${RUNTIME_ENV}.rotate.XXXXXX")
 new_env=$(mktemp "${RUNTIME_ENV}.rotate.XXXXXX")
@@ -18,7 +20,7 @@ rollback() {
   printf 'Credential activation failed; restoring the previous runtime env.\n' >&2
   cp -p "$old_env" "$new_env" || return 1
   mv -f "$new_env" "$RUNTIME_ENV" || return 1
-  if ! compose up -d --force-recreate caddy >/dev/null 2>&1; then
+  if ! compose up -d --force-recreate --wait --wait-timeout 180 caddy >/dev/null 2>&1; then
     printf 'ERROR: previous credentials were restored but Caddy could not be restarted; inspect the service.\n' >&2
     return 1
   fi
@@ -48,7 +50,7 @@ chmod 600 "$new_env"
 rotation_active=1
 mv -f "$new_env" "$RUNTIME_ENV"
 
-if ! compose up -d --force-recreate caddy; then
+if ! compose up -d --force-recreate --wait --wait-timeout 180 caddy; then
   exit 1
 fi
 if ! "$SCRIPT_DIR/check-server.sh"; then

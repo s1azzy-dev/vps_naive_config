@@ -4,6 +4,8 @@
   gather_facts: false
   remote_user: "{{ bootstrap_user_name }}"
   become: "{{ bootstrap_user_name != 'root' }}"
+  vars:
+    ansible_become_password: "{{ bootstrap_become_password | default('') }}"
   roles:
     - role: bootstrap
       when: bootstrap_apply_user
@@ -15,9 +17,35 @@
   gather_facts: false
   remote_user: "{{ user_name }}"
   become: true
+  become_flags: -H -S -k
+  vars:
+    ansible_become_password: "{{ managed_become_password }}"
   pre_tasks:
+    - name: Require explicit ownership before managed host changes
+      ansible.builtin.import_tasks: ../roles/user/tasks/ownership.yml
+      vars:
+        user_require_existing: true
+
+    - name: Reject passwordless managed sudo as proof of a password
+      become: false
+      ansible.builtin.command:
+        argv: [/usr/bin/sudo, -n, -k, /usr/bin/true]
+      register: bootstrap_passwordless_sudo
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Require password-backed managed sudo
+      ansible.builtin.assert:
+        that: bootstrap_passwordless_sudo.rc != 0
+        fail_msg: Managed sudo must require a password; remove NOPASSWD for this account before retrying.
+        quiet: true
+
     - name: Prove password-backed managed sudo before SSH changes
-      ansible.builtin.command: /usr/bin/true
+      become: false
+      ansible.builtin.command:
+        argv: [/usr/bin/sudo, -S, -k, -p, '', /usr/bin/true]
+        stdin: "{{ managed_become_password }}"
       changed_when: false
       no_log: true
   roles:

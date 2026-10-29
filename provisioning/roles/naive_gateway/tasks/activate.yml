@@ -81,6 +81,19 @@
       changed_when: false
       no_log: true
 
+    - name: Preserve the accepted runtime before activation
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - "{{ lookup('ansible.builtin.file', role_path + '/../../../scripts/runtime_state.py') }}"
+          - begin
+          - "{{ naive_gateway_root }}"
+          - "{{ naive_gateway_config_dir }}"
+          - "{{ naive_gateway_release }}"
+      changed_when: true
+      no_log: true
+
     - name: Activate the validated runtime configuration atomically
       ansible.builtin.copy:
         src: "{{ naive_gateway_config_dir }}/gateway.env.pending"
@@ -126,20 +139,37 @@
       no_log: true
       when: naive_gateway_public_acceptance
 
-    - name: Point operational commands at the accepted release
-      ansible.builtin.file:
-        src: "{{ naive_gateway_release }}"
-        dest: "{{ naive_gateway_root }}/current"
-        state: link
-        owner: root
-        group: root
+    - name: Commit the accepted runtime and retain its predecessor
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - "{{ lookup('ansible.builtin.file', role_path + '/../../../scripts/runtime_state.py') }}"
+          - commit
+          - "{{ naive_gateway_root }}"
+          - "{{ naive_gateway_config_dir }}"
+      changed_when: true
+      no_log: true
   rescue:
+    - name: Recover the previous accepted runtime after activation failure
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - "{{ lookup('ansible.builtin.file', role_path + '/../../../scripts/runtime_state.py') }}"
+          - recover
+          - "{{ naive_gateway_root }}"
+          - "{{ naive_gateway_config_dir }}"
+      changed_when: false
+      no_log: true
+
     - name: Collect redacted gateway diagnostics
       ansible.builtin.include_tasks: diagnostics.yml
 
     - name: Report a safe deployment failure
       ansible.builtin.fail:
         msg: >-
-          Gateway candidate validation or activation failed. Existing releases and saved
-          credentials were retained. Resolve the failed task and rerun make deploy;
+          Gateway candidate validation or activation failed. The previous accepted runtime
+          was recovered, or the first unaccepted deployment was stopped. Pending credentials
+          and old releases remain available. Resolve the failed task and rerun make deploy;
           deployment was not declared healthy. Failed stage: {{ ansible_failed_task.name }}.

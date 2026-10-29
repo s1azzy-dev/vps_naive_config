@@ -31,14 +31,6 @@ fi
 [[ $tls == *'ALPN protocol: h2'* ]] || die "HTTP/2 was not negotiated"
 printf 'OK\n'
 
-printf 'Checking unauthenticated CONNECT probe resistance... '
-probe=$(curl -sS --include --max-time 15 --max-filesize 1048576 \
-  --proxy "https://${DOMAIN}:443" https://example.com/ 2>&1 || true)
-if grep -Eiq '(^|[[:space:]])407([[:space:]]|$)|Proxy-Authenticate|forward proxy' <<<"$probe"; then
-  die "unauthenticated probe exposed an obvious forward-proxy response"
-fi
-printf 'OK\n'
-
 printf 'Checking authenticated HTTPS proxy path... '
 proxy_h2=()
 if curl --help all 2>/dev/null | grep -q -- '--proxy-http2'; then
@@ -46,19 +38,36 @@ if curl --help all 2>/dev/null | grep -q -- '--proxy-http2'; then
 fi
 proxy_ok=0
 proxy_host=
+proxy_target=
+domain_lower=$(printf '%s' "$DOMAIN" | tr '[:upper:]' '[:lower:]')
 for target in https://example.com/ https://www.cloudflare.com/cdn-cgi/trace; do
   target_host=${target#https://}
   target_host=${target_host%%/*}
-  [[ ${DOMAIN,,} == "$target_host" ]] && continue
-  if printf 'proxy-user = "%s:%s"\n' "$NAIVE_USER" "$NAIVE_PASSWORD" | \
+  [[ $domain_lower == "$target_host" ]] && continue
+  if authenticated_connect=$(printf 'proxy-user = "%s:%s"\n' "$NAIVE_USER" "$NAIVE_PASSWORD" | \
     curl --config - -fsS --max-time 25 "${proxy_h2[@]}" --proxy "https://${DOMAIN}:443" \
-      "$target" -o /dev/null; then
+      "$target" -o /dev/null --write-out '%{http_connect}'); then
+    [[ $authenticated_connect == 200 ]] || continue
     proxy_ok=1
     proxy_host=$target_host
+    proxy_target=$target
     break
   fi
 done
-[[ $proxy_ok -eq 1 ]] || die "authenticated proxy request failed"
+[[ $proxy_ok -eq 1 ]] || die "proxy checks inconclusive: no authenticated test target succeeded; check gateway and external target availability"
+printf 'OK\n'
+
+printf 'Checking unauthenticated CONNECT rejection and probe resistance... '
+probe_rc=0
+probe=$(curl -sS --include --max-time 15 --max-filesize 1048576 \
+  --proxy "https://${DOMAIN}:443" "$proxy_target" --write-out '\n%{http_connect}' 2>&1) || probe_rc=$?
+probe_code=${probe##*$'\n'}
+if grep -Eiq '(^|[[:space:]])407([[:space:]]|$)|Proxy-Authenticate|forward proxy' <<<"$probe"; then
+  die "unauthenticated probe exposed an obvious forward-proxy response"
+fi
+[[ $probe_code != 2[0-9][0-9] ]] || die "unauthenticated CONNECT was accepted"
+[[ $probe_code == [34][0-9][0-9] && ( $probe_rc == 0 || $probe_rc == 56 ) ]] || \
+  die "anonymous proxy check inconclusive: no explicit CONNECT rejection (transport errors are not evidence)"
 printf 'OK\n'
 
 printf 'Checking container state and health... '

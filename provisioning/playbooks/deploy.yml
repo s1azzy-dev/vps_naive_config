@@ -4,6 +4,12 @@
   gather_facts: false
   become: true
   pre_tasks:
+    - name: Require ownership of the managed deployment account
+      ansible.builtin.import_tasks: ../roles/user/tasks/ownership.yml
+      vars:
+        user_name: "{{ docker_managed_user }}"
+        user_require_existing: true
+
     - name: Verify managed-user sudo before any deployment changes
       become_flags: -H -S -k
       ansible.builtin.command: /usr/bin/true

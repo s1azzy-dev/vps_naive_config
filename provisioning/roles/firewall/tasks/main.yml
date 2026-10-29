@@ -1,9 +1,14 @@
 ---
+- name: Load the shared Docker ingress contract
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/../../vars/docker_ingress.yml"
+
 - name: Require a valid configured SSH port
   ansible.builtin.assert:
     that:
       - firewall_ssh_port >= 1
       - firewall_ssh_port <= 65535
+      - firewall_ssh_port not in [80, 443]
     fail_msg: "Invalid firewall SSH port: {{ firewall_ssh_port }}"
     quiet: true
 

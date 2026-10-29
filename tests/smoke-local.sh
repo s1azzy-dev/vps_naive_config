@@ -69,21 +69,25 @@ grep -Fq 'ALPN protocol: h2' "$TMP_DIR/tls.txt"
 : >"$TMP_DIR/probe.headers"
 : >"$TMP_DIR/probe.body"
 : >"$TMP_DIR/probe.error"
+curl -kfsS --proxy-insecure --max-time 20 "${resolve_smoke[@]}" \
+  --proxy "https://${SMOKE_HOST}:${PORT}" \
+  --proxy-user "${USER_VALUE}:${PASSWORD_VALUE}" https://example.com/ -o /dev/null
 set +e
-curl -ksS --proxy-insecure --max-time 15 "${resolve_smoke[@]}" \
+probe_code=$(curl -ksS --proxy-insecure --max-time 15 "${resolve_smoke[@]}" \
   --proxy "https://${SMOKE_HOST}:${PORT}" \
   https://example.com/ -D "$TMP_DIR/probe.headers" -o "$TMP_DIR/probe.body" \
-  2>"$TMP_DIR/probe.error"
+  --write-out '%{http_connect}' 2>"$TMP_DIR/probe.error")
+probe_rc=$?
 set -e
 if grep -Eiq '(^|[[:space:]])407([[:space:]]|$)|Proxy-Authenticate|forward proxy' \
   "$TMP_DIR/probe.headers" "$TMP_DIR/probe.body" "$TMP_DIR/probe.error"; then
   printf 'unauthenticated probe exposed the proxy\n' >&2
   exit 1
 fi
-
-curl -kfsS --proxy-insecure --max-time 20 "${resolve_smoke[@]}" \
-  --proxy "https://${SMOKE_HOST}:${PORT}" \
-  --proxy-user "${USER_VALUE}:${PASSWORD_VALUE}" https://example.com/ -o /dev/null
+[[ $probe_code == [34][0-9][0-9] && ( $probe_rc == 0 || $probe_rc == 56 ) ]] || {
+  printf 'anonymous CONNECT did not produce an explicit rejection: code=%s rc=%s\n' "$probe_code" "$probe_rc" >&2
+  exit 1
+}
 
 docker logs "$CONTAINER" >"$TMP_DIR/container.log" 2>&1
 if grep -Fq 'example.com' "$TMP_DIR/container.log"; then

@@ -1,6 +1,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/sh
 CONFIG_FILE ?= .env
+BACKUP_FILE ?=
 
 RUNTIME_ENV ?= $(if $(wildcard .runtime-env-path),$(shell cat .runtime-env-path),/etc/naive-gateway/gateway.env)
 COMPOSE := env -u DOMAIN -u ACME_EMAIL -u NAIVE_USER -u NAIVE_PASSWORD -u CADDY_VERSION -u FORWARDPROXY_COMMIT docker compose --env-file versions.env --env-file "$(RUNTIME_ENV)" -f compose.yml $(if $(wildcard deployment.yml),-f deployment.yml)
@@ -23,7 +24,7 @@ MOLECULE := $(VENV_BIN)/molecule
 ANSIBLE_ENV := ANSIBLE_CONFIG="$(ANSIBLE_CONFIG_FILE)" ANSIBLE_HOME="$(CURDIR)/.ansible" ANSIBLE_LOCAL_TEMP="$(CURDIR)/.ansible/tmp"
 SHELL_FILES := $(wildcard scripts/*.sh) tests/smoke-local.sh
 
-.PHONY: help init tooling tooling-check lint ansible-check molecule check-config preflight bootstrap deploy provision verify credentials restart logs status check rotate-credentials backup validate test
+.PHONY: help init tooling tooling-check lint ansible-check molecule check-config preflight bootstrap deploy provision verify credentials restore restart logs status check rotate-credentials backup validate test
 
 help:
 	@printf '%s\n' \
@@ -38,6 +39,7 @@ help:
 		'  make provision     Bootstrap if needed, deploy, verify and display credentials' \
 		'  make verify        Verify SSH, firewall, Docker and gateway without reconfiguration' \
 		'  make credentials   Display current credentials in an interactive terminal' \
+		'  make restore BACKUP_FILE=/absolute/backup.tar.gz  Restore onto a managed empty VPS without Git' \
 		'' \
 		'Current server/runtime commands:' \
 		'  make status        Show the Caddy container status' \
@@ -85,6 +87,7 @@ ansible-check: tooling-check
 	@$(ANSIBLE_ENV) "$(ANSIBLE_PLAYBOOK)" --syntax-check provisioning/playbooks/bootstrap.yml
 	@$(ANSIBLE_ENV) "$(ANSIBLE_PLAYBOOK)" --syntax-check provisioning/playbooks/deploy.yml
 	@$(ANSIBLE_ENV) "$(ANSIBLE_PLAYBOOK)" --syntax-check provisioning/playbooks/verify.yml
+	@$(ANSIBLE_ENV) "$(ANSIBLE_PLAYBOOK)" --syntax-check provisioning/playbooks/restore.yml
 	@PATH="$(VENV_BIN):$$PATH" $(ANSIBLE_ENV) XDG_CACHE_HOME="$(CURDIR)/.ansible/cache" "$(ANSIBLE_LINT)" --offline
 
 molecule: tooling-check
@@ -123,6 +126,9 @@ verify: tooling-check
 
 credentials: tooling-check
 	@"$(CONTROLLER)" credentials --config "$(CONFIG_FILE)"
+
+restore: tooling-check
+	@"$(CONTROLLER)" restore --config "$(CONFIG_FILE)" --backup "$(BACKUP_FILE)"
 
 restart:
 	$(COMPOSE) restart caddy

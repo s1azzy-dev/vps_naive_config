@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -32,7 +33,11 @@ from naive_gateway_controller.ssh import (
     probe_ssh,
     probe_ssh_auth_methods,
 )
-from naive_gateway_controller.tooling import ansible_environment, project_root
+from naive_gateway_controller.tooling import (
+    ansible_environment,
+    check_playbook_syntax,
+    project_root,
+)
 
 PasswordPrompt = Callable[[], str]
 AnsibleExecutor = Callable[[Sequence[str], Mapping[str, object], Mapping[str, str]], int]
@@ -111,6 +116,7 @@ def execute_ansible(
 
 def _ssh_common_args(known_hosts_file: Path) -> str:
     options = (
+        "-4",
         "-F /dev/null",
         "-o BatchMode=yes",
         "-o IdentitiesOnly=yes",
@@ -130,6 +136,11 @@ def prompt_current_sudo_password() -> str:
     if not password:
         raise ProvisioningError("sudo password must not be empty")
     return password
+
+
+def prompt_bootstrap_sudo_password() -> str:
+    """Allow an empty password only for a bootstrap account with NOPASSWD sudo."""
+    return getpass.getpass("Bootstrap user current sudo password (empty for NOPASSWD): ")
 
 
 def run_deploy(
@@ -224,19 +235,56 @@ def run_verify(
         )
 
 
+def run_restore(settings: GatewaySettings, archive: Path, *, root: Path | None = None) -> None:
+    """Restore application state through Ansible without fetching any source Git."""
+    root = root or project_root()
+    archive = archive.resolve()
+    if not archive.is_file() or stat.S_IMODE(archive.stat().st_mode) != 0o600:
+        raise ProvisioningError("restore requires a regular backup archive with mode 0600")
+    check_playbook_syntax(root)
+    known_hosts = (root / "provisioning/known_hosts").resolve()
+    report = run_preflight(settings, known_hosts)
+    if report.mode is not PreflightMode.MANAGED:
+        raise ProvisioningError(
+            "restore requires a prepared managed host; run make bootstrap first"
+        )
+    variables: dict[str, object] = {
+        "ansible_host": settings.vps_host,
+        "ansible_port": settings.vps_port,
+        "ansible_user": settings.vps_user,
+        "ansible_ssh_private_key_file": str(settings.ssh_private_key),
+        "ansible_ssh_common_args": _ssh_common_args(known_hosts),
+        "ansible_become_password": prompt_current_sudo_password(),
+        "docker_managed_user": settings.vps_user,
+        "restore_archive": str(archive),
+        "restore_domain": settings.domain,
+    }
+    command = [
+        str(Path(sys.prefix) / "bin/ansible-playbook"),
+        "--inventory",
+        "naive_gateway,",
+        str(root / "provisioning/playbooks/restore.yml"),
+    ]
+    if execute_ansible(command, variables, ansible_environment(root)) != 0:
+        raise ProvisioningError(
+            "restore failed; keep the backup and inspect the empty-host/recovery requirements before retrying"
+        )
+
+
 def read_credentials(
     settings: GatewaySettings,
     password: str | None,
     *,
     root: Path | None = None,
-    preflight_runner: PreflightRunner = run_preflight,
     password_prompt: PasswordPrompt = prompt_current_sudo_password,
 ) -> tuple[str, str, str]:
     """Read runtime credentials through SSH/sudo with the password only on stdin."""
     root = root or project_root()
     known_hosts = (root / "provisioning/known_hosts").resolve()
-    if preflight_runner(settings, known_hosts).mode is not PreflightMode.MANAGED:
-        raise ProvisioningError("credentials require managed SSH; run make bootstrap")
+    if not known_hosts.is_file() or stat.S_IMODE(known_hosts.stat().st_mode) != 0o600:
+        raise ProvisioningError(
+            "credentials require a private known_hosts file; run make preflight"
+        )
     if password is None:
         password = password_prompt()
     remote_command = shlex.join(
@@ -285,42 +333,45 @@ def read_credentials(
 def run_provision(settings: GatewaySettings, *, root: Path | None = None) -> str:
     """Orchestrate bootstrap, deployment and verification using one in-memory password."""
     root = root or project_root()
+    check_playbook_syntax(root)
+    print("Ansible syntax: PASS (bootstrap, deploy, verify, restore)", flush=True)
     known_hosts = (root / "provisioning/known_hosts").resolve()
     try:
         report = run_preflight(settings, known_hosts)
     except ControllerError as error:
         raise ProvisioningError(f"preflight failed; resume with make preflight: {error}") from error
-    bootstrap_needed = report.mode is PreflightMode.BOOTSTRAP
-    if not bootstrap_needed:
-        root_status = _probe_key(settings, known_hosts, "root", probe_ssh).status
-        if root_status not in (SSHStatus.OK, SSHStatus.AUTH_FAILED):
-            raise ProvisioningError("cannot determine whether root SSH is disabled")
-        auth_methods = _probe_auth(settings, known_hosts, probe_ssh_auth_methods)
-        if auth_methods.status is not SSHStatus.AUTH_FAILED or not auth_methods.offer_observed:
-            raise ProvisioningError(
-                "cannot determine the managed user's SSH authentication methods"
-            )
-        bootstrap_needed = root_status is SSHStatus.OK or not auth_methods.password_methods_disabled
-    if bootstrap_needed:
-        password = prompt_sudo_password()
-        print("Bootstrap: starting", flush=True)
-        try:
-            run_bootstrap(settings, root=root, password_prompt=lambda: password)
-        except ControllerError as error:
-            raise ProvisioningError(
-                f"bootstrap failed; resume with make bootstrap: {error}"
-            ) from error
-    else:
-        password = prompt_current_sudo_password()
-        print("Bootstrap: SKIP (managed SSH is already hardened)", flush=True)
-    print("Deploy: starting", flush=True)
+    password = (
+        prompt_sudo_password()
+        if report.mode is PreflightMode.BOOTSTRAP
+        else prompt_current_sudo_password()
+    )
+    print("Bootstrap: reconciling managed access and firewall", flush=True)
     try:
-        run_deploy(settings, root=root, password_prompt=lambda: password)
+        run_bootstrap(
+            settings,
+            root=root,
+            password_prompt=lambda: password,
+            preflight_runner=lambda _settings, _known_hosts: report,
+        )
+    except ControllerError as error:
+        raise ProvisioningError(f"bootstrap failed; resume with make bootstrap: {error}") from error
+    print("Deploy: starting", flush=True)
+    managed_report = PreflightReport(report.network, PreflightMode.MANAGED, report.known_host_added)
+
+    def reuse_preflight(_settings: GatewaySettings, _known_hosts: Path) -> PreflightReport:
+        return managed_report
+
+    try:
+        run_deploy(
+            settings, root=root, password_prompt=lambda: password, preflight_runner=reuse_preflight
+        )
     except ControllerError as error:
         raise ProvisioningError(f"deploy failed; resume with make deploy: {error}") from error
     print("Deploy: PASS\nVerification: starting", flush=True)
     try:
-        run_verify(settings, root=root, password_prompt=lambda: password)
+        run_verify(
+            settings, root=root, password_prompt=lambda: password, preflight_runner=reuse_preflight
+        )
     except ControllerError as error:
         raise ProvisioningError(f"verification failed; resume with make verify: {error}") from error
     return password
@@ -360,6 +411,7 @@ def run_bootstrap(
     *,
     root: Path | None = None,
     password_prompt: PasswordPrompt = prompt_sudo_password,
+    bootstrap_password_prompt: PasswordPrompt = prompt_bootstrap_sudo_password,
     preflight_runner: PreflightRunner = run_preflight,
     ssh_probe: SSHProbe = probe_ssh,
     auth_probe: SSHAuthProbe = probe_ssh_auth_methods,
@@ -381,12 +433,18 @@ def run_bootstrap(
         raise ProvisioningError("bootstrap-user key connection failed after preflight")
 
     password = password_prompt()
+    bootstrap_password = (
+        bootstrap_password_prompt()
+        if apply_user_role and settings.vps_bootstrap_user != "root"
+        else ""
+    )
     variables: dict[str, object] = {
         "ansible_host": settings.vps_host,
         "ansible_port": settings.vps_port,
         "ansible_ssh_private_key_file": str(settings.ssh_private_key),
         "ansible_ssh_common_args": _ssh_common_args(known_hosts_file),
-        "ansible_become_password": password,
+        "bootstrap_become_password": bootstrap_password,
+        "managed_become_password": password,
         "bootstrap_apply_user": apply_user_role,
         "bootstrap_controller_epoch": int(time.time()),
         "bootstrap_user_name": settings.vps_bootstrap_user,
@@ -407,7 +465,7 @@ def run_bootstrap(
     managed_key = _probe_key(settings, known_hosts_file, settings.vps_user, ssh_probe)
     if managed_key.status is not SSHStatus.OK:
         raise ProvisioningError("managed-user reconnect failed after SSH hardening")
-    root_key = _probe_key(settings, known_hosts_file, settings.vps_bootstrap_user, ssh_probe)
+    root_key = _probe_key(settings, known_hosts_file, "root", ssh_probe)
     if root_key.status is not SSHStatus.AUTH_FAILED:
         raise ProvisioningError("root key login was not rejected after SSH hardening")
     auth_methods = _probe_auth(settings, known_hosts_file, auth_probe)
