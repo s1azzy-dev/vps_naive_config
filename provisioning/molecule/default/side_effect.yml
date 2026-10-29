@@ -48,6 +48,9 @@
             modification_time: preserve
             access_time: preserve
 
+- name: Exercise the audit-specific negative scenarios
+  ansible.builtin.import_playbook: audit.yml
+
 - name: Refuse to overwrite an unmanaged UFW rule
   hosts: all
   gather_facts: false
@@ -168,7 +171,7 @@
           - --config-file=/etc/docker/daemon.json
           - --storage-driver=vfs
           - --pidfile=/run/molecule-dockerd.pid
-      async: 1800
+      async: 7200
       poll: 0
       changed_when: true
 
@@ -260,7 +263,7 @@
           - --config-file=/etc/docker/daemon.json
           - --storage-driver=vfs
           - --pidfile=/run/molecule-dockerd.pid
-      async: 1800
+      async: 7200
       poll: 0
       changed_when: true
 
@@ -359,3 +362,6 @@
 
 - name: Exercise gateway deployment and recovery
   ansible.builtin.import_playbook: phase7.yml
+
+- name: Exercise autonomous application recovery and rotation
+  ansible.builtin.import_playbook: audit-runtime.yml

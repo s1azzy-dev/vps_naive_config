@@ -4,6 +4,8 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
+import pytest
+
 from naive_gateway_controller.ssh import (
     SSHProbeResult,
     SSHStatus,
@@ -24,6 +26,25 @@ class FakeRunner:
         if not self.known_hosts.exists():
             self.known_hosts.write_text("fake-host ssh-ed25519 AAAATESTONLY\n", encoding="utf-8")
         return subprocess.CompletedProcess(command, self.returncode, stdout="", stderr=self.stderr)
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        "Load key keyfile: invalid format\nPermission denied (publickey).",
+        "sign_and_send_pubkey: signing failed\nPermission denied (publickey).",
+        "no mutual signature algorithm\nPermission denied (publickey).",
+        "incorrect passphrase\nPermission denied (publickey).",
+        "Warning: Identity file key not accessible: No such file\nPermission denied (publickey).",
+        "WARNING: UNPROTECTED PRIVATE KEY FILE!\nPermission denied (publickey).",
+    ],
+)
+def test_local_key_errors_never_prove_remote_access_denial(
+    private_key: Path, tmp_path: Path, diagnostic: str
+) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    result = run_probe(private_key, known_hosts, FakeRunner(known_hosts, 255, diagnostic))
+    assert result.status is SSHStatus.LOCAL_ERROR
 
 
 def run_probe(private_key: Path, known_hosts: Path, runner: FakeRunner) -> SSHProbeResult:

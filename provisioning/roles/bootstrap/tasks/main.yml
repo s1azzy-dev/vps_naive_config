@@ -20,10 +20,10 @@
   ansible.builtin.assert:
     that:
       - >-
-        (ansible_facts.distribution == 'Debian' and
-        ansible_facts.distribution_major_version in ['12', '13']) or
         (ansible_facts.distribution == 'Ubuntu' and
-        ansible_facts.distribution_version in ['22.04', '24.04', '26.04'])
+        ansible_facts.distribution_version == '26.04') or
+        (bootstrap_test_fixture | default(false) and ansible_facts.distribution == 'Debian'
+        and ansible_facts.distribution_major_version == '12')
     fail_msg: >-
       Unsupported operating system: {{ ansible_facts.distribution }}
       {{ ansible_facts.distribution_version }}
@@ -32,7 +32,7 @@
 - name: Require a supported CPU architecture
   ansible.builtin.assert:
     that:
-      - ansible_facts.architecture in ['x86_64', 'aarch64']
+      - ansible_facts.architecture == 'x86_64' or (bootstrap_test_fixture | default(false) and ansible_facts.architecture == 'aarch64')
     fail_msg: "Unsupported architecture: {{ ansible_facts.architecture }}"
     quiet: true
 

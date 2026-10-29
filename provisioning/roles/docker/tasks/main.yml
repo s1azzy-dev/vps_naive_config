@@ -1,12 +1,15 @@
 ---
+- name: Load the shared Docker ingress contract
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/../../vars/docker_ingress.yml"
+
 - name: Require a supported Docker target
   ansible.builtin.assert:
     that:
-      - ansible_distribution in ['Debian', 'Ubuntu']
       - >-
-        (ansible_distribution == 'Debian' and ansible_distribution_major_version in ['12', '13']) or
-        (ansible_distribution == 'Ubuntu' and ansible_distribution_version in ['22.04', '24.04', '26.04'])
-      - ansible_architecture in ['x86_64', 'aarch64']
+        (ansible_distribution == 'Ubuntu' and ansible_distribution_version == '26.04') or
+        (docker_test_fixture | default(false) and ansible_distribution == 'Debian' and ansible_distribution_major_version == '12')
+      - ansible_architecture == 'x86_64' or (docker_test_fixture | default(false) and ansible_architecture == 'aarch64')
       - ansible_distribution_release | length > 0
       - docker_managed_user | length > 0
       - docker_apt_key_sha256 is match('^[0-9a-f]{64}$')
@@ -299,24 +302,9 @@
 - name: Require one managed Docker ingress jump for both address families
   ansible.builtin.assert:
     that:
-      - docker_effective_ingress_chains.results[0].stdout_lines == docker_expected_user_chain
-      - docker_effective_ingress_chains.results[1].stdout_lines == docker_expected_managed_chain
-      - docker_effective_ingress_chains.results[2].stdout_lines == docker_expected_user_chain
-      - docker_effective_ingress_chains.results[3].stdout_lines == docker_expected_managed_chain
+      - docker_effective_ingress_chains.results[0].stdout_lines == gateway_ingress_user_chain
+      - docker_effective_ingress_chains.results[1].stdout_lines == gateway_ingress_managed_chain
+      - docker_effective_ingress_chains.results[2].stdout_lines == gateway_ingress_user_chain
+      - docker_effective_ingress_chains.results[3].stdout_lines == gateway_ingress_managed_chain
     fail_msg: The effective Docker ingress policy is missing, reordered or duplicated.
     quiet: true
-  vars:
-    docker_expected_user_chain:
-      - -N DOCKER-USER
-      - -A DOCKER-USER -j NAIVE-GATEWAY-DOCKER
-      - -A DOCKER-USER -j RETURN
-    docker_expected_managed_chain:
-      - -N NAIVE-GATEWAY-DOCKER
-      - -A NAIVE-GATEWAY-DOCKER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
-      - -A NAIVE-GATEWAY-DOCKER -o docker0 -p tcp -m conntrack --ctstate NEW --ctorigdstport 80 -j RETURN
-      - -A NAIVE-GATEWAY-DOCKER -o docker0 -p tcp -m conntrack --ctstate NEW --ctorigdstport 443 -j RETURN
-      - -A NAIVE-GATEWAY-DOCKER -o br+ -p tcp -m conntrack --ctstate NEW --ctorigdstport 80 -j RETURN
-      - -A NAIVE-GATEWAY-DOCKER -o br+ -p tcp -m conntrack --ctstate NEW --ctorigdstport 443 -j RETURN
-      - -A NAIVE-GATEWAY-DOCKER -o docker0 -j DROP
-      - -A NAIVE-GATEWAY-DOCKER -o br+ -j DROP
-      - -A NAIVE-GATEWAY-DOCKER -j RETURN

@@ -60,7 +60,7 @@
           - --config-file=/etc/docker/daemon.json
           - --storage-driver=vfs
           - --pidfile=/run/molecule-dockerd.pid
-      async: 1800
+      async: 7200
       poll: 0
       changed_when: true
       when: molecule_phase7_daemon.rc != 0

@@ -16,6 +16,7 @@ from naive_gateway_controller.provisioning import (
     run_bootstrap,
     run_deploy,
     run_provision,
+    run_restore,
     run_verify,
 )
 from naive_gateway_controller.tooling import check_tooling, install_collections, project_root
@@ -37,6 +38,9 @@ def _parser() -> argparse.ArgumentParser:
         subparser.add_argument("--config", type=Path, default=Path(".env"))
     subparsers.add_parser("tooling-check")
     subparsers.add_parser("install-collections")
+    restore = subparsers.add_parser("restore")
+    restore.add_argument("--config", type=Path, default=Path(".env"))
+    restore.add_argument("--backup", type=Path, required=True)
     return parser
 
 
@@ -83,6 +87,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif arguments.command == "verify":
             run_verify(load_settings(arguments.config))
             print("Verification: PASS")
+        elif arguments.command == "restore":
+            run_restore(load_settings(arguments.config), arguments.backup)
+            print("Restore: PASS (backup image, runtime and certificates accepted)")
         elif arguments.command in ("provision", "credentials"):
             if not sys.stdout.isatty():
                 raise ControllerError("credentials are displayed only in an interactive terminal")

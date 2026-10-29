@@ -1,4 +1,13 @@
 ---
+- name: Refuse conditional SSH rules before changing configuration
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - "{{ lookup('ansible.builtin.file', role_path + '/../../files/sshd_policy.py') }}"
+      - /etc/ssh/sshd_config
+  changed_when: false
+
 - name: Ensure the OpenSSH drop-in directory exists
   ansible.builtin.file:
     path: /etc/ssh/sshd_config.d
@@ -7,12 +16,79 @@
     group: root
     mode: "0755"
 
-- name: Install the validated OpenSSH hardening drop-in
-  ansible.builtin.template:
-    src: "{{ ssh_hardening_template }}"
-    dest: /etc/ssh/sshd_config.d/00-naive-gateway-hardening.conf
-    owner: root
-    group: root
-    mode: "0600"
-    validate: /usr/sbin/sshd -t -f %s
-  notify: Validate and reload OpenSSH
+- name: Inspect the previous SSH hardening file
+  ansible.builtin.stat:
+    path: /etc/ssh/sshd_config.d/00-naive-gateway-hardening.conf
+  register: ssh_previous_file
+
+- name: Require a safe existing project hardening file before recovery snapshots
+  ansible.builtin.assert:
+    that:
+      - ssh_previous_file.stat.isreg | default(false)
+      - ssh_previous_file.stat.uid == 0
+      - ssh_previous_file.stat.gid == 0
+      - ssh_previous_file.stat.mode == '0600'
+    fail_msg: Existing project SSH hardening file must be root:root 0600 and regular; review migration before retrying.
+    quiet: true
+  when: ssh_previous_file.stat.exists
+
+- name: Preserve the previous SSH hardening bytes
+  ansible.builtin.slurp:
+    src: /etc/ssh/sshd_config.d/00-naive-gateway-hardening.conf
+  register: ssh_previous_content
+  when: ssh_previous_file.stat.exists
+  no_log: true
+
+- name: Install hardening with composed validation and recovery
+  block:
+    - name: Install the validated OpenSSH hardening drop-in
+      ansible.builtin.template:
+        src: "{{ ssh_hardening_template }}"
+        dest: /etc/ssh/sshd_config.d/00-naive-gateway-hardening.conf
+        owner: root
+        group: root
+        mode: "0600"
+        validate: /usr/sbin/sshd -t -f %s
+      register: ssh_candidate
+
+    - name: Validate the complete OpenSSH configuration before reload
+      ansible.builtin.command: /usr/sbin/sshd -t
+      changed_when: false
+
+    - name: Validate the composed effective authentication policy
+      ansible.builtin.include_role:
+        name: ssh_policy
+      vars:
+        ssh_policy_user: "{{ user_name }}"
+        ssh_policy_port: "{{ firewall_ssh_port }}"
+
+    - name: Reload OpenSSH without terminating established sessions # noqa: no-handler
+      ansible.builtin.service:
+        name: ssh
+        state: reloaded
+      when: ssh_candidate.changed
+      # Reload must stay inside this recovery block, after composed validation.
+  rescue:
+    - name: Restore the previous SSH hardening file
+      ansible.builtin.copy:
+        content: "{{ ssh_previous_content.content | b64decode }}"
+        dest: /etc/ssh/sshd_config.d/00-naive-gateway-hardening.conf
+        owner: "{{ ssh_previous_file.stat.uid }}"
+        group: "{{ ssh_previous_file.stat.gid }}"
+        mode: "{{ ssh_previous_file.stat.mode }}"
+      when: ssh_previous_file.stat.exists
+      no_log: true
+
+    - name: Remove an unaccepted first SSH hardening file
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config.d/00-naive-gateway-hardening.conf
+        state: absent
+      when: not ssh_previous_file.stat.exists
+
+    - name: Validate the restored complete SSH configuration
+      ansible.builtin.command: /usr/sbin/sshd -t
+      changed_when: false
+
+    - name: Stop after restoring SSH configuration without declaring access safe
+      ansible.builtin.fail:
+        msg: SSH hardening failed; previous configuration was restored. Inspect SSH before retrying.

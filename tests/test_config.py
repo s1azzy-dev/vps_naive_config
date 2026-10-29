@@ -9,6 +9,49 @@ from naive_gateway_controller.config import load_settings
 from naive_gateway_controller.errors import ConfigError
 
 
+@pytest.mark.parametrize("port", ["80", "443"])
+def test_gateway_ports_cannot_be_used_for_ssh(
+    config_factory: Callable[..., Path], port: str
+) -> None:
+    with pytest.raises(ConfigError, match="must not conflict"):
+        load_settings(config_factory(VPS_PORT=port))
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://secret-token@github.com/owner/repo.git",
+        "https://name:secret-token@github.com/owner/repo.git",
+        "https://@github.com/owner/repo.git",
+        "ssh://git:secret-token@github.com/owner/repo.git",
+        "ssh://git%3Asecret-token@github.com/owner/repo.git",
+        "https://github.com:invalid/repo",
+        "https://github.com/repo?token=secret-token",
+    ],
+)
+def test_repository_credentials_are_rejected_without_echo(
+    config_factory: Callable[..., Path], url: str
+) -> None:
+    with pytest.raises(ConfigError) as error:
+        load_settings(config_factory(GATEWAY_REPOSITORY=url))
+    assert "secret-token" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/owner/repo.git",
+        "git@github.com:owner/repo.git",
+        "ssh://git@github.com:22/owner/repo.git",
+        "ssh://deploy@github.com/owner/repo.git",
+    ],
+)
+def test_public_and_deploy_key_repository_urls_remain_supported(
+    config_factory: Callable[..., Path], url: str
+) -> None:
+    assert load_settings(config_factory(GATEWAY_REPOSITORY=url)).gateway_repository == url
+
+
 def test_valid_config_and_documented_defaults(
     config_factory: Callable[..., Path],
     monkeypatch: pytest.MonkeyPatch,

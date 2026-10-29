@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -9,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from naive_gateway_controller import provisioning as provisioning_module
+from naive_gateway_controller.cli import main
 from naive_gateway_controller.config import GatewaySettings, load_settings
 from naive_gateway_controller.errors import ProvisioningError
 from naive_gateway_controller.network import NetworkReport
@@ -170,11 +172,44 @@ def test_new_host_bootstrap_applies_user_then_requires_safe_post_checks(
 
     assert outcome is BootstrapOutcome.APPLIED
     assert executor.variables["bootstrap_apply_user"] is True
-    assert executor.variables["ansible_become_password"] == password
+    assert executor.variables["managed_become_password"] == password
+    assert executor.variables["bootstrap_become_password"] == ""
+    assert "ansible_become_password" not in executor.variables
     assert str(executor.variables["user_password_hash"]).startswith("$6$")
     assert password not in " ".join(executor.command)
     assert password not in executor.environment.values()
     assert key_probe.users == ["root", "slazzy", "root"]
+
+
+@pytest.mark.parametrize("bootstrap_password", ["bootstrap-only-secret", ""])
+def test_nonroot_bootstrap_separates_passwords_and_checks_literal_root(
+    config_factory: Callable[..., Path],
+    tmp_path: Path,
+    bootstrap_password: str,
+) -> None:
+    settings = load_settings(config_factory(VPS_BOOTSTRAP_USER="ubuntu"))
+    executor = RecordingExecutor()
+    probe = SequencedKeyProbe(
+        SSHProbeResult(SSHStatus.OK),
+        SSHProbeResult(SSHStatus.OK),
+        SSHProbeResult(SSHStatus.AUTH_FAILED),
+    )
+    run_bootstrap(
+        settings,
+        root=tmp_path,
+        password_prompt=lambda: "managed-secret",
+        bootstrap_password_prompt=lambda: bootstrap_password,
+        preflight_runner=_preflight(PreflightMode.BOOTSTRAP),
+        ssh_probe=probe,
+        auth_probe=SequencedAuthProbe(disabled_auth()),
+        ansible_executor=executor,
+    )
+    assert probe.users == ["ubuntu", "slazzy", "root"]
+    assert executor.variables["bootstrap_become_password"] == bootstrap_password
+    assert executor.variables["managed_become_password"] == "managed-secret"
+    assert "ansible_become_password" not in executor.variables
+    assert "managed-secret" not in " ".join(executor.command)
+    assert not bootstrap_password or bootstrap_password not in " ".join(executor.command)
 
 
 def test_managed_host_skips_root_bootstrap_but_applies_later_host_roles(
@@ -279,6 +314,9 @@ def test_provision_reuses_one_password_across_bootstrap_deploy_and_verify(
 ) -> None:
     phases: list[tuple[str, str]] = []
     password = "single-sudo-password"
+    monkeypatch.setattr(
+        provisioning_module, "check_playbook_syntax", lambda _root: phases.append(("syntax", ""))
+    )
     monkeypatch.setattr(provisioning_module, "run_preflight", _preflight(PreflightMode.BOOTSTRAP))
     monkeypatch.setattr(provisioning_module, "prompt_sudo_password", lambda: password)
 
@@ -295,7 +333,66 @@ def test_provision_reuses_one_password_across_bootstrap_deploy_and_verify(
     monkeypatch.setattr(provisioning_module, "run_verify", fake_stage("verify"))
 
     assert run_provision(settings, root=tmp_path) == password
-    assert phases == [("bootstrap", password), ("deploy", password), ("verify", password)]
+    assert phases == [
+        ("syntax", ""),
+        ("bootstrap", password),
+        ("deploy", password),
+        ("verify", password),
+    ]
+
+
+@pytest.mark.parametrize(
+    "broken_path",
+    [
+        "playbooks/bootstrap.yml",
+        "playbooks/deploy.yml",
+        "playbooks/verify.yml",
+        "playbooks/restore.yml",
+        "roles/naive_gateway/tasks/credentials.yml",
+    ],
+)
+def test_provision_with_invalid_playbook_stops_before_any_vps_interaction(
+    broken_path: str,
+    config_factory: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = Path(__file__).resolve().parent.parent
+    root = tmp_path / "controller"
+    shutil.copytree(
+        source / "provisioning",
+        root / "provisioning",
+        ignore=shutil.ignore_patterns("molecule", "known_hosts", "__pycache__"),
+    )
+    (root / ".ansible").mkdir()
+    (root / ".ansible/collections").symlink_to(source / ".ansible/collections")
+    secret = "must-not-appear-in-parser-output"
+    (root / "provisioning" / broken_path).write_text(
+        f"---\n- name: {secret}\n  invalid: [\n", encoding="utf-8"
+    )
+
+    def unexpected_remote_work(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("invalid playbooks must stop provision before probes, prompts or VPS changes")
+
+    monkeypatch.setattr(provisioning_module, "project_root", lambda: root)
+    monkeypatch.setattr(provisioning_module, "run_preflight", unexpected_remote_work)
+    monkeypatch.setattr(provisioning_module, "prompt_sudo_password", unexpected_remote_work)
+    monkeypatch.setattr(provisioning_module, "prompt_current_sudo_password", unexpected_remote_work)
+    monkeypatch.setattr(provisioning_module, "run_bootstrap", unexpected_remote_work)
+    monkeypatch.setattr(provisioning_module, "run_deploy", unexpected_remote_work)
+    monkeypatch.setattr(provisioning_module, "run_verify", unexpected_remote_work)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+    assert main(["provision", "--config", str(config_factory())]) == 1
+
+    output = capsys.readouterr()
+    assert "local Ansible syntax check failed" in output.err
+    assert "make ansible-check" in output.err
+    assert "no VPS changes were made" in output.err
+    assert secret not in output.out + output.err
+    assert "PASS" not in output.out
+    assert not (root / "provisioning/known_hosts").exists()
 
 
 def test_verify_refuses_root_ssh_before_invoking_ansible(settings: GatewaySettings) -> None:
@@ -311,12 +408,15 @@ def test_verify_refuses_root_ssh_before_invoking_ansible(settings: GatewaySettin
     assert executor.command == ()
 
 
-def test_provision_skips_bootstrap_only_when_ssh_is_hardened(
+def test_provision_reconciles_firewall_even_when_ssh_is_hardened(
     settings: GatewaySettings,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     phases: list[str] = []
+    monkeypatch.setattr(
+        provisioning_module, "check_playbook_syntax", lambda _root: phases.append("syntax")
+    )
     monkeypatch.setattr(provisioning_module, "run_preflight", _preflight(PreflightMode.MANAGED))
     monkeypatch.setattr(
         provisioning_module, "_probe_key", lambda *_args: SSHProbeResult(SSHStatus.AUTH_FAILED)
@@ -338,7 +438,7 @@ def test_provision_skips_bootstrap_only_when_ssh_is_hardened(
     monkeypatch.setattr(provisioning_module, "run_verify", run_stage("verify"))
 
     assert run_provision(settings, root=tmp_path) == "existing"
-    assert phases == ["deploy", "verify"]
+    assert phases == ["syntax", "bootstrap", "deploy", "verify"]
 
 
 def test_read_credentials_passes_sudo_password_only_via_stdin(
@@ -361,11 +461,19 @@ def test_read_credentials_passes_sudo_password_only_via_stdin(
         )
 
     monkeypatch.setattr(provisioning_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        provisioning_module,
+        "run_preflight",
+        lambda *_args: pytest.fail("credentials must not depend on gateway DNS"),
+    )
+    known_hosts = tmp_path / "provisioning/known_hosts"
+    known_hosts.parent.mkdir()
+    known_hosts.write_text("test host key\n")
+    known_hosts.chmod(0o600)
     result = read_credentials(
         settings,
         None,
         root=tmp_path,
-        preflight_runner=_preflight(PreflightMode.MANAGED),
         password_prompt=lambda: password,
     )
     assert result == ("proxy.example.com", "stored-user", secret)
@@ -373,3 +481,27 @@ def test_read_credentials_passes_sudo_password_only_via_stdin(
     assert kwargs["input"] == f"{password}\n"
     assert password not in " ".join(command)
     assert secret not in " ".join(command)
+    assert "StrictHostKeyChecking=yes" in " ".join(command)
+
+
+@pytest.mark.parametrize("returncode", [1, 255])
+def test_credentials_refuse_sudo_and_host_key_failures_without_leaking_output(
+    settings: GatewaySettings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+) -> None:
+    known_hosts = tmp_path / "provisioning/known_hosts"
+    known_hosts.parent.mkdir()
+    known_hosts.write_text("known key\n")
+    known_hosts.chmod(0o600)
+    monkeypatch.setattr(
+        provisioning_module.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, returncode, stdout="sensitive-runtime", stderr="sensitive-error"
+        ),
+    )
+    with pytest.raises(ProvisioningError, match="check SSH and sudo") as error:
+        read_credentials(settings, "password", root=tmp_path)
+    assert "sensitive" not in str(error.value)

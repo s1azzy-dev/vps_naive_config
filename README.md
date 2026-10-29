@@ -1,6 +1,6 @@
 # Naive Gateway for VPS
 
-Naive Gateway разворачивается на чистом Ubuntu/Debian VPS через Ansible. Локальный
+Naive Gateway разворачивается на чистом Ubuntu 26.04 LTS amd64 VPS через Ansible. Локальный
 controller проверяет настройки и SSH, Ansible настраивает пользователя, firewall,
 Docker и Caddy. Клиентская конфигурация в репозиторий не входит.
 
@@ -8,7 +8,8 @@ Docker и Caddy. Клиентская конфигурация в репозит
 
 Подготовьте VPS с доступом по SSH-ключу, домен с `A`-записью на его публичный
 IPv4 и доступные `22/tcp` (или выбранный SSH-порт), `80/tcp`, `443/tcp`.
-Если есть `AAAA`, она должна указывать на доступный IPv6 этого VPS.
+MVP работает только по IPv4: у gateway domain не должно быть `AAAA`.
+SSH-порт 80 или 443 запрещён из-за конфликта с Caddy.
 
 На своём компьютере:
 
@@ -25,7 +26,10 @@ make provision
 непосредственно на VPS и не копирует незакоммиченные изменения controller.
 Приватный Git-репозиторий должен быть доступен root-пользователю VPS.
 
-`make provision` выбирает bootstrap или уже подготовленный host, запрашивает
+`make provision` сначала локально проверяет синтаксис обязательных playbooks:
+bootstrap, deploy, verify и restore. Ошибка останавливает команду до подключения к VPS;
+подробности доступны через `make ansible-check`.
+Затем controller выбирает bootstrap или уже подготовленный host, запрашивает
 sudo-пароль без echo, разворачивает gateway и проверяет его. В интерактивном
 терминале в конце показываются endpoint и учётные данные. После установки их
 можно повторно получить командой `make credentials`. Локальный `.env` не
@@ -49,7 +53,9 @@ sudo make -C /opt/naive-gateway/current restart
 ```
 
 Backup сохраняется в `/var/backups/naive-gateway/` с правами `0600` и содержит
-действующие секреты. Источник обновляется на controller; версии Caddy и
+release, действующие секреты, точный Docker image и Caddy volumes. Восстановление
+на новом пустом runtime не требует исходного Git или registry:
+`make bootstrap`, затем `make restore BACKUP_FILE=/absolute/path/backup.tar.gz`. Источник обновляется на controller; версии Caddy и
 `forwardproxy` закреплены в `versions.env` и не следуют за `latest`.
 
 Подробности, восстановление и диагностика: [docs/vps-setup.md](docs/vps-setup.md).

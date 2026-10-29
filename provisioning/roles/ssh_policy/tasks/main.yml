@@ -1,0 +1,57 @@
+---
+- name: Refuse conditional SSH authentication policy in all included files
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - "{{ lookup('ansible.builtin.file', role_path + '/../../files/sshd_policy.py') }}"
+      - /etc/ssh/sshd_config
+  changed_when: false
+
+- name: Read the current SSH connection context without sudo
+  become: false
+  ansible.builtin.command:
+    argv: [/usr/bin/printenv, SSH_CONNECTION]
+  register: ssh_policy_connection
+  changed_when: false
+  when: ssh_policy_test_connection | length == 0
+
+- name: Derive client and server addresses for effective SSH validation
+  ansible.builtin.set_fact:
+    ssh_policy_addresses: >-
+      {{ ssh_policy_test_connection if ssh_policy_test_connection | length > 0
+         else ssh_policy_connection.stdout.split() }}
+
+- name: Require a complete SSH connection context
+  ansible.builtin.assert:
+    that:
+      - ssh_policy_addresses | length == 4
+      - ssh_policy_addresses[3] | int == ssh_policy_port | int
+    fail_msg: Cannot verify effective SSH policy without the actual client and server context.
+    quiet: true
+
+- name: Read effective root and managed SSH configurations
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/sshd
+      - -T
+      - -C
+      - "{{ 'user=' ~ item ~ ',host=' ~ ssh_policy_addresses[0] ~ ',addr=' ~ ssh_policy_addresses[0] ~
+           ',laddr=' ~ ssh_policy_addresses[2] ~ ',lport=' ~ ssh_policy_addresses[3] }}"
+  loop: [root, "{{ ssh_policy_user }}"]
+  register: ssh_policy_effective
+  changed_when: false
+
+- name: Require unconditional root and password authentication denial
+  ansible.builtin.assert:
+    that:
+      - "'pubkeyauthentication yes' in item.stdout_lines"
+      - "'passwordauthentication no' in item.stdout_lines"
+      - "'kbdinteractiveauthentication no' in item.stdout_lines"
+      - "'permitrootlogin no' in item.stdout_lines"
+      - "('port ' ~ (ssh_policy_port | string)) in item.stdout_lines"
+    fail_msg: Effective root or managed SSH settings are not hardened.
+    quiet: true
+  loop: "{{ ssh_policy_effective.results }}"
+  loop_control:
+    label: "{{ item.item }}"

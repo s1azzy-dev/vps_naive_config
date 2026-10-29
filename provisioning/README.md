@@ -1,3 +1,9 @@
+# Текущий контракт
+
+MVP: Ubuntu 26.04 LTS amd64, IPv4-only, без DOMAIN AAAA. Debian Molecule ниже —
+локальный test fixture, не дополнительная production платформа. Актуальные
+решения и отложенные VPS-gates — в [плане](../docs/ansible-provisioning-plan.md).
+
 # Ansible provisioning
 
 Локальная и Molecule-часть фаз 4–6 реализует `make bootstrap`, роли
@@ -27,7 +33,9 @@ volumes. Существующий сервис при ошибке этих пр
 приоритет; явная пара из controller config заменяет credentials. После validation
 runtime env записывается атомарно, Compose ожидает health, затем выполняются
 public HTTPS и `check-server.sh`. При ошибке активации надо исправить причину и
-повторить `make deploy`; автоматического rollback всего deployment пока нет.
+повторить `make deploy`; deployment возвращает предыдущие env/release/container. При прерывании следующий
+запуск сначала восстанавливает snapshot из `deployment-recovery`; при ошибке
+самого recovery snapshot сохраняется и требуется диагностика.
 
 Molecule использует отдельный Git fixture runtime-файлов этапа 7, настоящий
 production Caddy image и local issuer. Он проверяет failed-first retry,
@@ -96,3 +104,8 @@ loopback bind, UFW reload, Docker restart, exact chains и negative adoption.
 GitHub Actions отдельно выполняет полный quality gate, pytest на Python
 3.14 и Docker/Caddy runtime smoke. Workflow не запускает `preflight` и не
 подключается к VPS.
+
+Для локального Docker с отдельным CLI context (например, OrbStack) Python SDK
+может потребовать явный сокет: `DOCKER_HOST="$(docker context inspect --format '{{.Endpoints.docker.Host}}')" make molecule`.
+Тестовый daemon ограничен watchdog на 2 часа; CI timeout остаётся 20 минут,
+а обычное завершение сценария удаляет весь disposable instance.

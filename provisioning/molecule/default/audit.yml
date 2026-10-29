@@ -1,0 +1,143 @@
+---
+- name: Exercise audit ownership and composed SSH recovery boundaries
+  hosts: all
+  gather_facts: false
+  vars:
+    user_name: molecule_admin
+    firewall_ssh_port: 22
+  tasks:
+    - name: Exercise a scoped shell NOPASSWD rule without accepting a wrong password
+      block:
+        - name: Grant passwordless shell only in the disposable fixture
+          ansible.builtin.copy:
+            content: "molecule_admin ALL=(root) NOPASSWD: /bin/sh\n"
+            dest: /etc/sudoers.d/molecule-shell-nopasswd
+            owner: root
+            group: root
+            mode: "0440"
+            validate: /usr/sbin/visudo -cf %s
+
+        - name: Confirm that Ansible-style shell sudo alone would bypass password proof
+          ansible.builtin.command:
+            argv: [/usr/sbin/runuser, -u, molecule_admin, --, /usr/bin/sudo, -n, -k, /bin/sh, -c, 'true']
+          changed_when: false
+
+        - name: Require direct sudo true to reject the wrong managed password
+          ansible.builtin.command:
+            argv: [/usr/sbin/runuser, -u, molecule_admin, --, /usr/bin/sudo, -S, -k, -p, '', /usr/bin/true]
+            stdin: molecule-deliberately-wrong-password
+          register: molecule_wrong_sudo
+          failed_when: molecule_wrong_sudo.rc == 0
+          changed_when: false
+          no_log: true
+      always:
+        - name: Remove only the scoped fixture sudo rule
+          ansible.builtin.file:
+            path: /etc/sudoers.d/molecule-shell-nopasswd
+            state: absent
+
+    - name: Refuse a Match rule without altering the active hardening
+      block:
+        - name: Add a synthetic conditional root override
+          ansible.builtin.copy:
+            content: "Match User root\n  PermitRootLogin yes\n"
+            dest: /etc/ssh/sshd_config.d/99-molecule-match.conf
+            owner: root
+            group: root
+            mode: "0600"
+
+        - name: Attempt hardening with a conditional policy
+          ansible.builtin.include_role:
+            name: ssh
+      rescue:
+        - name: Record actual rejection of conditional policy
+          ansible.builtin.set_fact:
+            molecule_match_rejected: "{{ ansible_failed_task.name == 'Refuse conditional SSH rules before changing configuration' }}"
+      always:
+        - name: Remove the synthetic conditional override
+          ansible.builtin.file:
+            path: /etc/ssh/sshd_config.d/99-molecule-match.conf
+            state: absent
+
+    - name: Require conditional policy to have failed at the correct boundary
+      ansible.builtin.assert:
+        that: molecule_match_rejected | default(false)
+
+    - name: Exercise a candidate valid alone but invalid in composed configuration
+      block:
+        - name: Apply a duplicate subsystem candidate
+          ansible.builtin.include_role:
+            name: ssh
+          vars:
+            ssh_hardening_template: "{{ lookup('ansible.builtin.env', 'MOLECULE_SCENARIO_DIRECTORY') }}/molecule-composed-ssh.conf.j2"
+      rescue:
+        - name: Record actual composed SSH recovery
+          ansible.builtin.set_fact:
+            molecule_composed_rejected: "{{ 'previous configuration was restored' in ansible_failed_result.msg | default('') }}"
+
+    - name: Require actual composed validation rejection
+      ansible.builtin.assert:
+        that: molecule_composed_rejected | default(false)
+
+    - name: Compare the restored hardening to the original bytes
+      ansible.builtin.command:
+        argv: [/usr/bin/cmp, --silent, /root/.molecule-phase4/valid-ssh-drop-in, /etc/ssh/sshd_config.d/00-naive-gateway-hardening.conf]
+      changed_when: false
+
+    - name: Create an existing unowned account with an additional group
+      ansible.builtin.user:
+        name: molecule_unmanaged
+        groups: [adm]
+        append: true
+        create_home: true
+
+    - name: Create the existing account SSH directory
+      ansible.builtin.file:
+        path: /home/molecule_unmanaged/.ssh
+        state: directory
+        owner: molecule_unmanaged
+        group: molecule_unmanaged
+        mode: "0700"
+
+    - name: Preserve an unowned emergency access file
+      ansible.builtin.copy:
+        content: "emergency-key-must-survive\n"
+        dest: /home/molecule_unmanaged/.ssh/authorized_keys
+        owner: molecule_unmanaged
+        group: molecule_unmanaged
+        mode: "0600"
+
+    - name: Attempt adopting the unowned account
+      block:
+        - name: Apply the actual user role to an existing unowned account
+          ansible.builtin.include_role:
+            name: user
+          vars:
+            user_name: molecule_unmanaged
+            user_password_hash: "{{ '$6$unused-test-hash' }}"
+            user_authorized_key: ssh-ed25519 AAAATESTONLY
+      rescue:
+        - name: Record actual account adoption refusal
+          ansible.builtin.set_fact:
+            molecule_adoption_rejected: "{{ ansible_failed_task.name == 'Refuse automatic adoption of an existing unmanaged account' }}"
+
+    - name: Require actual account policy rejection
+      ansible.builtin.assert:
+        that: molecule_adoption_rejected | default(false)
+
+    - name: Read unowned account groups after refusal
+      ansible.builtin.command:
+        argv: [/usr/bin/id, -Gn, molecule_unmanaged]
+      register: molecule_unmanaged_groups
+      changed_when: false
+
+    - name: Read the preserved emergency file after refusal
+      ansible.builtin.slurp:
+        src: /home/molecule_unmanaged/.ssh/authorized_keys
+      register: molecule_emergency_key
+
+    - name: Require unowned groups and access to survive refusal
+      ansible.builtin.assert:
+        that:
+          - "'adm' in molecule_unmanaged_groups.stdout.split()"
+          - molecule_emergency_key.content | b64decode | trim == 'emergency-key-must-survive'

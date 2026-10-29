@@ -1,0 +1,45 @@
+---
+- name: Require a safe non-root managed account name
+  ansible.builtin.assert:
+    that:
+      - user_name is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - user_name != 'root'
+    quiet: true
+
+- name: Detect whether the managed account already exists
+  ansible.builtin.command:
+    argv: [/usr/bin/getent, passwd, "{{ user_name }}"]
+  register: user_existing_account
+  changed_when: false
+  failed_when: user_existing_account.rc not in [0, 2]
+
+- name: Inspect the account ownership marker
+  ansible.builtin.stat:
+    path: "/etc/naive-gateway/user-managed-{{ user_name }}"
+  register: user_management_marker
+
+- name: Require a trustworthy account marker
+  ansible.builtin.assert:
+    that:
+      - user_management_marker.stat.isreg | default(false)
+      - user_management_marker.stat.uid == 0
+      - user_management_marker.stat.gid == 0
+      - user_management_marker.stat.mode == '0600'
+    fail_msg: Existing account ownership marker is unsafe; explicit migration is required.
+    quiet: true
+  when: user_management_marker.stat.exists
+
+- name: Read the account ownership marker
+  ansible.builtin.slurp:
+    src: "/etc/naive-gateway/user-managed-{{ user_name }}"
+  register: user_management_identity
+  when: user_management_marker.stat.exists
+
+- name: Refuse automatic adoption of an existing unmanaged account
+  ansible.builtin.assert:
+    that:
+      - user_existing_account.rc != 0 or user_management_marker.stat.exists
+      - not (user_require_existing | default(false)) or user_existing_account.rc == 0
+      - not user_management_marker.stat.exists or (user_management_identity.content | b64decode | trim) == user_name
+    fail_msg: Existing account is not owned by this project. Refusing to replace its groups or keys; explicit migration is required.
+    quiet: true

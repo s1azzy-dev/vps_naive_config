@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -11,6 +12,29 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.mark.parametrize(
+    ("value", "returncode"),
+    [
+        ("https://github.com/owner/repo.git\n", 0),
+        (" https://github.com/owner/repo.git\n", 1),
+        ("https://github.com/owner/repo.git\n\n", 1),
+        ("https://private-token@github.com/owner/repo.git\n", 1),
+    ],
+)
+def test_role_repository_validator_checks_the_exact_stdin_value(
+    value: str, returncode: int
+) -> None:
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "src/naive_gateway_controller/repository.py")],
+        input=value,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == returncode
+    assert "private-token" not in result.stdout + result.stderr
 
 
 def test_reproducible_version_pins() -> None:

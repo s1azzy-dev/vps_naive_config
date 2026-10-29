@@ -44,6 +44,45 @@ def ansible_environment(root: Path) -> dict[str, str]:
     return environment
 
 
+def check_playbook_syntax(root: Path) -> None:
+    """Parse every provisioning stage locally before any VPS interaction."""
+    command = [
+        str(Path(sys.prefix) / "bin/ansible-playbook"),
+        "--syntax-check",
+        "--inventory",
+        "naive_gateway,",
+        *(
+            str(root / "provisioning/playbooks" / name)
+            for name in (
+                "bootstrap.yml",
+                "deploy.yml",
+                "verify.yml",
+                "restore.yml",
+            )
+        ),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            cwd=root,
+            env=ansible_environment(root),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ToolingError(
+            "unable to run the local Ansible syntax check; run make tooling and make ansible-check"
+        ) from error
+    if completed.returncode != 0:
+        raise ToolingError(
+            "local Ansible syntax check failed; run make ansible-check for diagnostics; "
+            "no VPS changes were made"
+        )
+
+
 def _load_collection_requirements(root: Path) -> list[dict[str, object]]:
     requirements_path = root / "provisioning/requirements.yml"
     try:
@@ -134,6 +173,29 @@ def check_tooling(root: Path | None = None) -> None:
     for command_name in ("ssh", "ssh-keygen", "make", "git"):
         if shutil.which(command_name) is None:
             raise ToolingError(f"required command is missing: {command_name}")
+        arguments = {
+            "ssh": ["-V"],
+            "ssh-keygen": ["-l", "-f", "/dev/null"],
+            "make": ["--version"],
+            "git": ["--version"],
+        }
+        try:
+            probe = subprocess.run(
+                [command_name, *arguments[command_name]],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ToolingError(
+                f"required command cannot run: {command_name}; check its architecture and PATH"
+            ) from error
+        if command_name != "ssh-keygen" and probe.returncode != 0:
+            raise ToolingError(f"required command is not working: {command_name}")
+        if command_name == "ssh-keygen" and probe.returncode not in {1, 255}:
+            raise ToolingError("required command is not working: ssh-keygen")
     openssh = subprocess.run(
         ["ssh", "-G", "-o", "StrictHostKeyChecking=accept-new", "localhost"],
         check=False,

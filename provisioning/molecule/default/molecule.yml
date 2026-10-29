@@ -23,6 +23,9 @@ provisioner:
     host_vars:
       phase5-debian12:
         ansible_python_interpreter: /usr/bin/python3
+        docker_test_fixture: true
+        ssh_policy_test_connection: ['127.0.0.1', '12345', '127.0.0.1', '22']
+        naive_gateway_local_test_source: true
 verifier:
   name: testinfra
   directory: tests

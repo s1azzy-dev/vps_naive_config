@@ -2,44 +2,46 @@
 
 ## Предварительные условия
 
-- Чистый Ubuntu 22.04/24.04/26.04 или Debian 12/13, архитектура x86_64 либо arm64.
-- Bootstrap SSH-доступ по ключу, домен с `A`-записью на публичный IPv4 и
-  корректная доступная `AAAA`, если она существует.
-- Входящий SSH-порт и `80/tcp`, `443/tcp`; `443/udp` не требуется.
-- Локальные Python 3.14, Git, Make, OpenSSH и доступ к исходному репозиторию.
+Целевой MVP — чистый **Ubuntu 26.04 LTS amd64**. Его реальная приёмка пока не
+выполнена. Нужны bootstrap SSH по ключу, matching DOMAIN A и отсутствие DOMAIN
+AAAA. SSH использует IPv4; его порт не может быть 80/443. Снаружи разрешены
+выбранный SSH TCP port, 80/tcp, 443/tcp. 443/udp не публикуется.
 
-Публичный ключ добавляется VPS-провайдером при создании сервера. Приватный ключ
-остаётся на controller. Если используется firewall провайдера, разрешите те же
-входящие TCP-порты. Обязательная защита host и Docker ingress настраивается
-Ansible через UFW и `DOCKER-USER`.
+На controller нужны Python 3.14, Git, Make, OpenSSH и локальный checkout.
+Provider firewall опционален: Ansible сам настраивает UFW и Docker ingress.
 
-## Первое развёртывание
+## Установка и обновление
 
 ```bash
 make init
-# Заполните .env вручную: VPS_HOST, SSH_PRIVATE_KEY, DOMAIN, ACME_EMAIL.
+# Заполнить .env: VPS_HOST, SSH_PRIVATE_KEY, DOMAIN, ACME_EMAIL.
 make tooling
 make provision
 ```
 
-В `.env` указывайте абсолютный путь к приватному ключу. `SSH_PUBLIC_KEY` по
-умолчанию равен пути приватного ключа с добавленным `.pub`. Пароль sudo не
-хранится в `.env`: новый пароль запрашивается дважды, существующий — один раз.
-Все значения передаются через `.env`, без `HOST=...` и других CLI-параметров.
+Ключи задаются абсолютными путями. SSH_PUBLIC_KEY по умолчанию равен
+SSH_PRIVATE_KEY + `.pub`. `.env` имеет mode 0600 и не копируется на VPS.
+GATEWAY_REF должен быть опубликован до deploy: рабочее дерево controller не
+передаётся на VPS. Private Git доступен root через SSH deploy key; HTTPS URL
+с userinfo (включая token-only username) и SSH URL с password запрещены. Старые backup с Git
+config следует считать содержащими credentials и хранить как секреты.
 
-`GATEWAY_REPOSITORY` должен быть доступен root на VPS, а `GATEWAY_REF` должен
-ссылаться на опубликованный commit или ветку этой версии. Controller не копирует
-рабочее дерево на VPS. При первом запуске новый SSH host key записывается в
-`provisioning/known_hosts`; изменившийся известный ключ отклоняется. Проверьте
-его fingerprint по независимому каналу до первого подключения.
+Bootstrap может подключаться root либо non-root. Для non-root его существующий
+sudo password запрашивается отдельно (пустой только для bootstrap NOPASSWD).
+Новый managed password подтверждается дважды. Он проверяется прямым sudo через
+stdin после нового managed SSH, до изменения root/password доступа. Managed
+NOPASSWD не считается доказательством правильного пароля. Сохраняйте исходную
+сессию до проверки нового подключения.
 
-Bootstrap создаёт пользователя, проверяет отдельный вход и sudo до изменения
-sshd, валидирует конфигурацию SSH и затем настраивает UFW. Не закрывайте
-существующую bootstrap-сессию до проверки нового подключения. Пользователь не
-добавляется в группу `docker`. Операционная приёмка этого процесса на disposable
-VPS ещё не проведена.
+Conditional sshd Match, включая вложенные Include, отклоняется без автоматической
+миграции. Неуправляемый существующий user также отклоняется: другие ключи/группы
+не удаляются. Не создавайте ownership marker вручную ради обхода ошибки. Сначала
+проверьте пользователя, аварийный доступ и backup и отдельно согласуйте миграцию.
+Для новых hosts проще выбрать новое имя VPS_USER. После прерывания между созданием
+account и marker также требуется такая проверка; повтор не присваивает user молча.
 
-## Отдельные команды
+Provision проверяет syntax всех обязательных playbooks до SSH, затем повторно
+применяет host roles даже при готовом managed SSH. Самостоятельные команды:
 
 ```bash
 make check-config
@@ -50,14 +52,17 @@ make verify
 make credentials
 ```
 
-`verify` выполняет read-only проверки конфигурации SSH, firewall, Docker,
-release и работающего HTTPS/proxy. `credentials` выводит секреты только в
-интерактивный терминал. `make deploy` обновляет проверенный ref; повторный
-deploy сохраняет credentials, если оба поля credentials в `.env` пусты. Явная
-пара из `.env` применяется при каждом deploy. После ротации обновите или очистите
-оба поля на controller, иначе следующий deploy снова применит старую пару.
+Credentials читаются только через managed SSH/sudo с известным host key и
+выводятся только в интерактивный терминал. Исправный DNS gateway не требуется.
+Preflight/deploy/verify требуют корректный DOMAIN DNS. Новые SSH host keys
+запоминаются через accept-new; изменившийся ключ не принимается автоматически.
+Проверьте первый fingerprint по независимому каналу.
 
-На VPS команды запускаются через sudo из принятого release:
+При пустой паре NAIVE_USER/NAIVE_PASSWORD deploy сохраняет runtime credentials;
+явная пара применяется при каждом deploy. После rotation очистите или обновите
+оба значения на controller, иначе следующий deploy применит старую пару.
+
+## Серверные операции
 
 ```bash
 sudo make -C /opt/naive-gateway/current status
@@ -66,52 +71,78 @@ sudo make -C /opt/naive-gateway/current logs
 sudo make -C /opt/naive-gateway/current validate
 sudo make -C /opt/naive-gateway/current backup
 sudo make -C /opt/naive-gateway/current rotate-credentials
-sudo make -C /opt/naive-gateway/current restart
 ```
 
-Архив в `/var/backups/naive-gateway/` содержит runtime env с секретами, commit,
-Git-конфигурацию источника и файлы активного release. Git URL также может
-содержать данные доступа. Доступ к каталогу — `0700`, к архиву — `0600`.
-Передайте архив в защищённое хранилище отдельно от VPS. Docker volumes с ACME
-сертификатами не входят в архив: новый сервер получит сертификат после
-настройки DNS и доступности портов.
+Не выполняйте deploy, restore, backup и rotation параллельно. Backup имеет mode
+0600 в каталоге `/var/backups/naive-gateway/` с mode 0700. Он содержит runtime env,
+файлы release, точный image и оба Caddy volumes с certificate private keys. Git
+config в новые backup не входит. Отдельно перенесите архив в защищённое хранилище.
 
-## Восстановление и диагностика
+## Автономное восстановление без исходного Git
 
-Для переноса подготовьте новый VPS и controller `.env`. Из защищённого архива
-возьмите `NAIVE_USER` и `NAIVE_PASSWORD` из `gateway.env` и укажите оба в новом
-`.env`; значение `.release-complete` можно использовать как `GATEWAY_REF`, а
-origin URL в `.git/config` — как `GATEWAY_REPOSITORY`.
-Например, извлеките эти файлы в приватный временный каталог на controller:
+Сохраните старый VPS и архив до полной проверки нового. На controller используйте
+уже имеющийся checkout с этой версией restore. Подготовьте `.env` нового VPS:
+DOMAIN должен совпадать с сохранённым в backup, а A-запись — указывать на новый
+VPS; AAAA отсутствует. Это перенос того же endpoint и credentials. Смену domain
+выполните последующим обычным deploy, когда source Git снова доступен.
 
 ```bash
-umask 077
-restore_dir=$(mktemp -d)
-tar -xzf /absolute/path/to/backup.tar.gz -C "$restore_dir" gateway.env .release-complete .git/config
+chmod 600 /absolute/path/backup.tar.gz
+make bootstrap
+make restore BACKUP_FILE=/absolute/path/backup.tar.gz
+make credentials
 ```
 
-Откройте файлы в редакторе, перенесите нужные значения в `.env` и после этого
-удалите временную копию с секретами. Не добавляйте её в Git.
+Тот же Ansible bootstrap настраивает host; restore playbook устанавливает Docker
+и acceptance tools. Runtime берётся целиком из backup, без Git fetch, Docker
+build или image pull. Caddy certificates/config volumes переносятся вместе с
+image. Restore проверяет image identity, archive paths, domain, health и публичный
+HTTPS/proxy. Загрузка apt packages/Ansible dependencies для подготовки нового
+host может требовать сеть; автономность относится к исходникам и runtime образу.
 
-Укажите новый `VPS_HOST`, при необходимости обновите DNS, затем выполните
-`make provision`. Старый VPS сохраняйте до проверки нового. При переносе DNS
-публичный сертификат нового VPS не появится до разрешения домена на новый адрес.
+Runtime acceptance после restore выполняется самим check-server.sh. Полный
+`make verify` также сверяет Git checkout/origin/ref и требует source checkout.
+До возвращения Git используйте `sudo make -C /opt/naive-gateway/current check`;
+после восстановления Git обычный `make deploy` создаст checkout, затем доступен
+полный `make verify`. Backup manifest/image identity не объявляются проверкой Git origin.
 
-После ошибки bootstrap сохраните существующее SSH-подключение, восстановите
-доступ через консоль провайдера и повторите `make bootstrap`. Не отключайте
-root/password access вручную до проверки нового SSH-входа и sudo.
-После ошибки deploy исправьте указанную причину и повторите `make deploy`;
-подготовленные credentials сохраняются. Автоматический rollback всего release
-не предусмотрен. Ротация credentials восстанавливает прежний runtime env при
-ошибке запуска или проверки Caddy; если перезапуск после rollback не удался,
-проверьте `status` и `logs` на VPS. После аварийного завершения процесса могут
-остаться root-only файлы `gateway.env.rotate.*`: сохраните их до восстановления
-доступа и удалите после проверки актуальной пары credentials.
+Restore отказывается перезаписывать существующие gateway containers, volumes,
+env/current или незавершённый recovery. Не удаляйте их вслепую ради повторного
+запуска. При отказе сохраните backup, изучите service/state; новый host остаётся
+предпочтительным местом восстановления. При обычной ошибке acceptance созданный
+candidate останавливается, вновь созданные volumes удаляются, архив сохраняется.
+При сбое самого recovery сохраните `deployment-recovery` для диагностики.
 
-Если `make verify` завершился с ошибкой, используйте название неуспешного слоя,
-`make preflight` и серверные `status`/`logs`. Проверьте DNS и доступность портов;
-изменившийся host key требует отдельного подтверждения у провайдера.
+Старые архивы без manifest/image/volumes не являются автономными backup нового
+формата. Для них нужен доступный сохранённый Git commit и прежний recovery path;
+не называйте такое восстановление автономным. Сохраняйте старый сервер до
+создания и проверки нового backup.
 
-Реальные reconnect/lockout-negative, external port scan, systemd/reboot, restore
-и fresh/second-run сценарии для всех поддерживаемых ОС остаются открытыми до
-приёмки на disposable VM/VPS; результаты в контейнере не заменяют эту приёмку.
+## Сбои и сохранение предыдущей версии
+
+После bootstrap failure оставьте исходный SSH-сеанс открытым. При необходимости
+восстановите доступ через консоль провайдера, затем повторите `make bootstrap`.
+Не отключайте root/password вручную до проверки managed SSH/sudo.
+
+Перед изменением runtime env deploy сохраняет предыдущие env/release. Ошибка
+активации вызывает восстановление прежнего container/env/current. Прерванный
+процесс восстанавливается при следующем `make deploy` до подготовки кандидата.
+При неудаче rollback snapshot остаётся в `/etc/naive-gateway/deployment-recovery`;
+не удаляйте его и не запускайте rotation/backup до восстановления согласованного
+состояния. Проверьте status/logs, Docker service, доступность прежнего release и
+image, устраните причину и повторите `make deploy`. Первый неуспешный deploy
+сохраняет pending credentials, но не объявляется установленным.
+
+После успешного acceptance предыдущие credentials/release находятся в приватном
+`previous-deployment`. Старые snapshots сохраняются в `deployment-history`.
+Автоматического prune нет: current, предыдущий успешный image/release, volumes,
+backups и незавершённый recovery нельзя удалять. Cleanup допускается только после
+подтверждения здорового текущего сервиса и проверки отдельного backup.
+
+Rotation при ошибке возвращает прежний env и перезапускает Caddy. Если перезапуск
+самого rollback не удался, путь к сохранённому root-only env выводится для recovery.
+Файлы `gateway.env.rotate.*` после аварийного завершения сохраняйте до проверки
+актуальных credentials; затем удаляйте только подтверждённо лишние копии.
+
+Реальные SSH/lockout, public ACME/CONNECT, external sentinel/scan, systemd/reboot,
+restore и rotation на Ubuntu VPS оставлены финальными gates по решению владельца.

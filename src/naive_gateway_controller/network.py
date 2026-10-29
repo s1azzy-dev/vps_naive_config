@@ -87,9 +87,11 @@ def collect_report(
         raise PreflightError(f"VPS_HOST has no A or AAAA records: {vps_host}")
     domain_ipv4 = resolver(domain, "A", timeout)
     domain_ipv6 = resolver(domain, "AAAA", timeout)
-    reachable_vps = tuple(
-        address for address in (*vps_ipv4, *vps_ipv6) if connector(address, port, timeout)
-    )
+    if domain_ipv6:
+        raise PreflightError("IPv4-only MVP requires DOMAIN to have no AAAA records.")
+    if not vps_ipv4:
+        raise PreflightError("IPv4-only MVP requires VPS_HOST to have an IPv4 address.")
+    reachable_vps = tuple(address for address in vps_ipv4 if connector(address, port, timeout))
     unreachable_domain_ipv6 = tuple(
         address for address in domain_ipv6 if not connector(address, port, timeout)
     )
@@ -109,10 +111,10 @@ def validate_report(report: NetworkReport) -> None:
         raise PreflightError("DOMAIN must have at least one A record.")
     if set(report.domain_ipv4) - set(report.vps_ipv4):
         raise PreflightError("DOMAIN A records do not match VPS_HOST addresses.")
-    if set(report.domain_ipv6) - set(report.vps_ipv6):
-        raise PreflightError("DOMAIN AAAA records do not match VPS_HOST addresses.")
-    if report.unreachable_domain_ipv6:
-        raise PreflightError("DOMAIN has an AAAA record that is unreachable on the SSH port.")
+    if report.domain_ipv6:
+        raise PreflightError("IPv4-only MVP requires DOMAIN to have no AAAA records.")
+    if not report.vps_ipv4:
+        raise PreflightError("IPv4-only MVP requires VPS_HOST to have an IPv4 address.")
     if not report.ssh_target_reachable:
         raise PreflightError("VPS SSH port is unreachable from the controller.")
 

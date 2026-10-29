@@ -1,4 +1,15 @@
 ---
+- name: Validate the repository transport before any deployment mutation
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - "{{ lookup('ansible.builtin.file', role_path + '/../../../src/naive_gateway_controller/repository.py') }}"
+    stdin: "{{ naive_gateway_repository }}"
+  changed_when: false
+  no_log: true
+  when: not (naive_gateway_local_test_source | default(false))
+
 - name: Require safe deployment inputs
   ansible.builtin.assert:
     that:
@@ -93,6 +104,18 @@
     - "{{ naive_gateway_root }}"
     - "{{ naive_gateway_root }}/releases"
     - "{{ naive_gateway_config_dir }}"
+
+- name: Recover an interrupted runtime transaction before preparing a new candidate
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - "{{ lookup('ansible.builtin.file', role_path + '/../../../scripts/runtime_state.py') }}"
+      - recover
+      - "{{ naive_gateway_root }}"
+      - "{{ naive_gateway_config_dir }}"
+  changed_when: false
+  no_log: true
 
 - name: Prepare the requested source and immutable release
   ansible.builtin.import_tasks: release.yml

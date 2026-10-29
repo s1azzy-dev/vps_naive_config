@@ -1,0 +1,67 @@
+---
+- name: Restore an autonomous gateway backup onto a prepared managed host
+  hosts: naive_gateway
+  gather_facts: false
+  become: true
+  pre_tasks:
+    - name: Require ownership before restoring onto a managed host
+      ansible.builtin.import_tasks: ../roles/user/tasks/ownership.yml
+      vars:
+        user_name: "{{ docker_managed_user }}"
+        user_require_existing: true
+
+    - name: Verify managed sudo before restoring application state
+      become_flags: -H -S -k
+      ansible.builtin.command: /usr/bin/true
+      changed_when: false
+      no_log: true
+
+    - name: Gather target facts before installing Docker
+      ansible.builtin.setup:
+  roles:
+    - role: docker
+  tasks:
+    - name: Install application acceptance and operational prerequisites
+      ansible.builtin.apt:
+        name: [ca-certificates, curl, make, openssl, python3]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Create a private restore staging directory
+      ansible.builtin.file:
+        path: /var/backups/naive-gateway/restore
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Copy application restore tools from the local controller
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../scripts/{{ item }}"
+        dest: "/var/backups/naive-gateway/restore/{{ item }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: [restore_runtime.py, runtime_state.py]
+
+    - name: Copy the private backup without accessing the source repository
+      ansible.builtin.copy:
+        src: "{{ restore_archive }}"
+        dest: /var/backups/naive-gateway/restore/backup.tar.gz
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Restore the saved image credentials certificates and runtime
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - /var/backups/naive-gateway/restore/restore_runtime.py
+          - /var/backups/naive-gateway/restore/backup.tar.gz
+          - /opt/naive-gateway
+          - /etc/naive-gateway
+          - "{{ restore_domain }}"
+      changed_when: true
+      no_log: true

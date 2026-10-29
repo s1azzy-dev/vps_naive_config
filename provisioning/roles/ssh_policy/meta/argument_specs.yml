@@ -1,0 +1,15 @@
+---
+argument_specs:
+  main:
+    short_description: Validate inputs for the ssh_policy role
+    options:
+      ssh_policy_user:
+        type: str
+        required: true
+      ssh_policy_port:
+        type: int
+        required: true
+      ssh_policy_test_connection:
+        type: list
+        elements: str
+        default: []
