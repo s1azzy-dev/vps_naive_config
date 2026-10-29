@@ -52,7 +52,7 @@
       rescue:
         - name: Record actual rejection of conditional policy
           ansible.builtin.set_fact:
-            molecule_match_rejected: "{{ ansible_failed_task.name == 'Refuse conditional SSH rules before changing configuration' }}"
+            molecule_match_rejected: "{{ 'conditional Match configuration' in (ansible_failed_result.stderr | default('')) }}"
       always:
         - name: Remove the synthetic conditional override
           ansible.builtin.file:
@@ -81,7 +81,7 @@
 
     - name: Compare the restored hardening to the original bytes
       ansible.builtin.command:
-        argv: [/usr/bin/cmp, --silent, /root/.molecule-phase4/valid-ssh-drop-in, /etc/ssh/sshd_config.d/00-naive-gateway-hardening.conf]
+        argv: [/usr/bin/cmp, --silent, /root/.molecule-state/valid-ssh-drop-in, /etc/ssh/sshd_config.d/00-naive-gateway-hardening.conf]
       changed_when: false
 
     - name: Create an existing unowned account with an additional group
@@ -119,7 +119,7 @@
       rescue:
         - name: Record actual account adoption refusal
           ansible.builtin.set_fact:
-            molecule_adoption_rejected: "{{ ansible_failed_task.name == 'Refuse automatic adoption of an existing unmanaged account' }}"
+            molecule_adoption_rejected: "{{ 'Existing account is not owned by this project' in (ansible_failed_result.msg | default('')) }}"
 
     - name: Require actual account policy rejection
       ansible.builtin.assert:

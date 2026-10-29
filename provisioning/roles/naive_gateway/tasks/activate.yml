@@ -11,7 +11,7 @@
       - --env-file
       - "{{ naive_gateway_release }}/versions.env"
       - --env-file
-      - "{{ naive_gateway_config_dir }}/gateway.env.pending"
+      - "/etc/naive-gateway/gateway.env.pending"
       - -f
       - "{{ naive_gateway_release }}/compose.yml"
       - -f
@@ -75,7 +75,7 @@
       ansible.builtin.command:
         argv: >-
           {{ ['/usr/bin/docker', 'run', '--rm', '--network', 'none',
-              '--env-file', naive_gateway_config_dir + '/gateway.env.pending',
+              '--env-file', '/etc/naive-gateway/gateway.env.pending',
               '--mount', 'type=bind,src=' + naive_gateway_release + '/Caddyfile,dst=/etc/caddy/Caddyfile,readonly',
               naive_gateway_image, 'caddy', 'validate', '--config', '/etc/caddy/Caddyfile', '--adapter', 'caddyfile'] }}
       changed_when: false
@@ -88,16 +88,16 @@
           - -c
           - "{{ lookup('ansible.builtin.file', role_path + '/../../../scripts/runtime_state.py') }}"
           - begin
-          - "{{ naive_gateway_root }}"
-          - "{{ naive_gateway_config_dir }}"
+          - "/opt/naive-gateway"
+          - "/etc/naive-gateway"
           - "{{ naive_gateway_release }}"
       changed_when: true
       no_log: true
 
     - name: Activate the validated runtime configuration atomically
       ansible.builtin.copy:
-        src: "{{ naive_gateway_config_dir }}/gateway.env.pending"
-        dest: "{{ naive_gateway_config_dir }}/gateway.env"
+        src: "/etc/naive-gateway/gateway.env.pending"
+        dest: "/etc/naive-gateway/gateway.env"
         remote_src: true
         owner: root
         group: root
@@ -111,7 +111,7 @@
         files: [compose.yml, deployment.yml]
         env_files:
           - "{{ naive_gateway_release }}/versions.env"
-          - "{{ naive_gateway_config_dir }}/gateway.env"
+          - "/etc/naive-gateway/gateway.env"
         build: never
         pull: never
         state: present
@@ -146,8 +146,8 @@
           - -c
           - "{{ lookup('ansible.builtin.file', role_path + '/../../../scripts/runtime_state.py') }}"
           - commit
-          - "{{ naive_gateway_root }}"
-          - "{{ naive_gateway_config_dir }}"
+          - "/opt/naive-gateway"
+          - "/etc/naive-gateway"
       changed_when: true
       no_log: true
   rescue:
@@ -158,8 +158,8 @@
           - -c
           - "{{ lookup('ansible.builtin.file', role_path + '/../../../scripts/runtime_state.py') }}"
           - recover
-          - "{{ naive_gateway_root }}"
-          - "{{ naive_gateway_config_dir }}"
+          - "/opt/naive-gateway"
+          - "/etc/naive-gateway"
       changed_when: false
       no_log: true
 

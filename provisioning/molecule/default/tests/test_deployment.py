@@ -15,7 +15,7 @@ def test_gateway_runtime_is_private_and_release_is_pinned(host: object) -> None:
     assert runtime.user == "root"
     assert runtime.group == "root"
     assert runtime.mode == 0o600
-    commit = host.file("/root/.molecule-phase4/gateway-deployment-verified").content_string.strip()
+    commit = host.file("/root/.molecule-state/gateway-deployment-verified").content_string.strip()
     current = host.file("/opt/naive-gateway/current")
     assert current.is_symlink
     assert current.linked_to == f"/opt/naive-gateway/releases/{commit}"

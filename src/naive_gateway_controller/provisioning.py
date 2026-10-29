@@ -12,7 +12,6 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
@@ -57,13 +56,6 @@ class SSHAuthProbe(Protocol):
         known_hosts_file: Path,
     ) -> SSHAuthMethodsResult:
         """Inspect server-offered authentication methods."""
-
-
-class BootstrapOutcome(StrEnum):
-    """Stable result rendered by the CLI."""
-
-    APPLIED = "applied"
-    SKIPPED = "managed host already hardened"
 
 
 def prompt_sudo_password() -> str:
@@ -216,7 +208,6 @@ def run_verify(
         "verify_ssh_port": settings.vps_port,
         "verify_domain": settings.domain,
         "verify_acme_email": settings.acme_email,
-        "verify_repository": settings.gateway_repository,
         "verify_ref": settings.gateway_ref,
         "verify_naive_user": settings.naive_user or "",
         "verify_naive_password": (
@@ -416,7 +407,7 @@ def run_bootstrap(
     ssh_probe: SSHProbe = probe_ssh,
     auth_probe: SSHAuthProbe = probe_ssh_auth_methods,
     ansible_executor: AnsibleExecutor = execute_ansible,
-) -> BootstrapOutcome:
+) -> None:
     """Create the managed user, harden SSH, and apply the host firewall."""
     root = root or project_root()
     known_hosts_file = (root / "provisioning/known_hosts").resolve()
@@ -471,4 +462,3 @@ def run_bootstrap(
     auth_methods = _probe_auth(settings, known_hosts_file, auth_probe)
     if not auth_methods.password_methods_disabled:
         raise ProvisioningError("password or keyboard-interactive SSH remains available")
-    return BootstrapOutcome.APPLIED

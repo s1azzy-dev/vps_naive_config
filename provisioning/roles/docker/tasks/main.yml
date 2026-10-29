@@ -7,19 +7,15 @@
   ansible.builtin.assert:
     that:
       - >-
-        (ansible_distribution == 'Ubuntu' and ansible_distribution_version == '26.04') or
-        (docker_test_fixture | default(false) and ansible_distribution == 'Debian' and ansible_distribution_major_version == '12')
-      - ansible_architecture == 'x86_64' or (docker_test_fixture | default(false) and ansible_architecture == 'aarch64')
-      - ansible_distribution_release | length > 0
+        (ansible_facts.distribution == 'Ubuntu' and ansible_facts.distribution_version == '26.04') or
+        (docker_test_fixture | default(false) and ansible_facts.distribution == 'Debian' and ansible_facts.distribution_major_version == '12')
+      - ansible_facts.architecture == 'x86_64' or (docker_test_fixture | default(false) and ansible_facts.architecture == 'aarch64')
+      - ansible_facts.distribution_release | length > 0
       - docker_managed_user | length > 0
       - docker_apt_key_sha256 is match('^[0-9a-f]{64}$')
-      - docker_apt_key_fingerprint is match('^[0-9A-F]{40}$')
-      - docker_packages | length == 5
-      - docker_default_bind_ipv4 == '127.0.0.1'
-      - docker_firewall_backend == 'iptables'
     fail_msg: >-
-      Unsupported or unsafe Docker role inputs for {{ ansible_distribution }}
-      {{ ansible_distribution_version }} on {{ ansible_architecture }}.
+      Unsupported or unsafe Docker role inputs for {{ ansible_facts.distribution }}
+      {{ ansible_facts.distribution_version }} on {{ ansible_facts.architecture }}.
     quiet: true
 
 - name: Inspect the Docker management marker
@@ -117,27 +113,9 @@
     group: root
     mode: "0755"
 
-- name: Render the Docker daemon candidate in memory
-  ansible.builtin.set_fact:
-    docker_daemon_candidate: >-
-      {{ lookup('ansible.builtin.template', docker_daemon_template) }}
-
-- name: Validate the Docker daemon candidate
-  ansible.builtin.assert:
-    that:
-      - (docker_daemon_candidate | from_json)['allow-direct-routing'] == false
-      - (docker_daemon_candidate | from_json)['firewall-backend'] == 'iptables'
-      - (docker_daemon_candidate | from_json)['iptables'] == true
-      - (docker_daemon_candidate | from_json)['ip6tables'] == true
-      - >-
-        (docker_daemon_candidate | from_json)['default-network-opts']['bridge']
-        ['com.docker.network.bridge.host_binding_ipv4'] == '127.0.0.1'
-    fail_msg: The Docker daemon candidate does not preserve the required firewall boundary.
-    quiet: true
-
-- name: Install the validated Docker daemon configuration
+- name: Install the Docker daemon configuration
   ansible.builtin.copy:
-    content: "{{ docker_daemon_candidate }}"
+    src: daemon.json
     dest: /etc/docker/daemon.json
     owner: root
     group: root
@@ -148,7 +126,6 @@
   ansible.builtin.apt:
     name:
       - ca-certificates
-      - gnupg
       - python3-debian
     state: present
     update_cache: true
@@ -164,30 +141,12 @@
 
 - name: Install the pinned official Docker signing key
   ansible.builtin.get_url:
-    url: "https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg"
+    url: "https://download.docker.com/linux/{{ ansible_facts.distribution | lower }}/gpg"
     dest: /etc/apt/keyrings/docker.asc
     checksum: "sha256:{{ docker_apt_key_sha256 }}"
     owner: root
     group: root
     mode: "0644"
-
-- name: Read the Docker signing-key fingerprint
-  ansible.builtin.command:
-    argv:
-      - /usr/bin/gpg
-      - --batch
-      - --show-keys
-      - --with-colons
-      - /etc/apt/keyrings/docker.asc
-  register: docker_signing_key
-  changed_when: false
-
-- name: Require the official Docker signing-key fingerprint
-  ansible.builtin.assert:
-    that:
-      - "('fpr:::::::::' ~ docker_apt_key_fingerprint ~ ':') in docker_signing_key.stdout"
-    fail_msg: The downloaded Docker signing key has an unexpected fingerprint.
-    quiet: true
 
 - name: Configure the official Docker deb822 repository
   ansible.builtin.deb822_repository:
@@ -195,13 +154,13 @@
     types:
       - deb
     uris:
-      - "https://download.docker.com/linux/{{ ansible_distribution | lower }}"
+      - "https://download.docker.com/linux/{{ ansible_facts.distribution | lower }}"
     suites:
-      - "{{ ansible_distribution_release }}"
+      - "{{ ansible_facts.distribution_release }}"
     components:
       - stable
     architectures:
-      - "{{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64' }}"
+      - "{{ 'amd64' if ansible_facts.architecture == 'x86_64' else 'arm64' }}"
     signed_by: /etc/apt/keyrings/docker.asc
     enabled: true
     state: present

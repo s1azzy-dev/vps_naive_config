@@ -21,11 +21,9 @@ class NetworkReport:
     """Resolved addresses and reachability results used by preflight."""
 
     vps_ipv4: tuple[str, ...]
-    vps_ipv6: tuple[str, ...]
     domain_ipv4: tuple[str, ...]
     domain_ipv6: tuple[str, ...]
     ssh_target_reachable: bool
-    unreachable_domain_ipv6: tuple[str, ...]
 
 
 def resolve_records(name: str, record_type: str, timeout: float) -> tuple[str, ...]:
@@ -47,30 +45,22 @@ def resolve_records(name: str, record_type: str, timeout: float) -> tuple[str, .
 
 def address_reachable(address: str, port: int, timeout: float) -> bool:
     """Return whether a TCP connection can be established to one IP address."""
-    parsed = ipaddress.ip_address(address)
-    family = socket.AF_INET6 if parsed.version == 6 else socket.AF_INET
-    target: tuple[str, int] | tuple[str, int, int, int]
-    target = (address, port, 0, 0) if family == socket.AF_INET6 else (address, port)
     try:
-        with socket.socket(family, socket.SOCK_STREAM) as connection:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
             connection.settimeout(timeout)
-            connection.connect(target)
+            connection.connect((address, port))
     except OSError:
         return False
     return True
 
 
-def host_addresses(
-    host: str, timeout: float, resolver: Resolver
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Resolve a hostname or split an IP literal by address family."""
+def host_ipv4(host: str, timeout: float, resolver: Resolver) -> tuple[str, ...]:
+    """Resolve only the address family supported by the gateway."""
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:
-        return resolver(host, "A", timeout), resolver(host, "AAAA", timeout)
-    if literal.version == 4:
-        return (str(literal),), ()
-    return (), (str(literal),)
+        return resolver(host, "A", timeout)
+    return (str(literal),) if literal.version == 4 else ()
 
 
 def collect_report(
@@ -82,26 +72,19 @@ def collect_report(
     connector: Connector = address_reachable,
 ) -> NetworkReport:
     """Collect DNS and TCP facts without making remote changes."""
-    vps_ipv4, vps_ipv6 = host_addresses(vps_host, timeout, resolver)
-    if not vps_ipv4 and not vps_ipv6:
-        raise PreflightError(f"VPS_HOST has no A or AAAA records: {vps_host}")
+    vps_ipv4 = host_ipv4(vps_host, timeout, resolver)
     domain_ipv4 = resolver(domain, "A", timeout)
     domain_ipv6 = resolver(domain, "AAAA", timeout)
     if domain_ipv6:
-        raise PreflightError("IPv4-only MVP requires DOMAIN to have no AAAA records.")
+        raise PreflightError("IPv4 gateway requires DOMAIN to have no AAAA records.")
     if not vps_ipv4:
-        raise PreflightError("IPv4-only MVP requires VPS_HOST to have an IPv4 address.")
+        raise PreflightError("IPv4 gateway requires VPS_HOST to have an IPv4 address.")
     reachable_vps = tuple(address for address in vps_ipv4 if connector(address, port, timeout))
-    unreachable_domain_ipv6 = tuple(
-        address for address in domain_ipv6 if not connector(address, port, timeout)
-    )
     return NetworkReport(
         vps_ipv4=vps_ipv4,
-        vps_ipv6=vps_ipv6,
         domain_ipv4=domain_ipv4,
         domain_ipv6=domain_ipv6,
         ssh_target_reachable=bool(reachable_vps),
-        unreachable_domain_ipv6=unreachable_domain_ipv6,
     )
 
 
@@ -112,9 +95,9 @@ def validate_report(report: NetworkReport) -> None:
     if set(report.domain_ipv4) - set(report.vps_ipv4):
         raise PreflightError("DOMAIN A records do not match VPS_HOST addresses.")
     if report.domain_ipv6:
-        raise PreflightError("IPv4-only MVP requires DOMAIN to have no AAAA records.")
+        raise PreflightError("IPv4 gateway requires DOMAIN to have no AAAA records.")
     if not report.vps_ipv4:
-        raise PreflightError("IPv4-only MVP requires VPS_HOST to have an IPv4 address.")
+        raise PreflightError("IPv4 gateway requires VPS_HOST to have an IPv4 address.")
     if not report.ssh_target_reachable:
         raise PreflightError("VPS SSH port is unreachable from the controller.")
 

@@ -20,14 +20,12 @@
       - (naive_gateway_user | length == 0) == (naive_gateway_password | length == 0)
       - naive_gateway_user is match('^[A-Za-z0-9._~-]*$')
       - naive_gateway_password is match('^[A-Za-z0-9._~-]*$')
-      - naive_gateway_root is match('^/[A-Za-z0-9/_-]+$')
-      - naive_gateway_config_dir is match('^/[A-Za-z0-9/_-]+$')
     quiet: true
   no_log: true
 
 - name: Inspect existing deployment root
   ansible.builtin.stat:
-    path: "{{ naive_gateway_root }}"
+    path: "/opt/naive-gateway"
   register: naive_gateway_root_stat
 
 - name: Refuse an unsafe existing deployment directory
@@ -42,7 +40,7 @@
 
 - name: Check for a legacy in-place installation
   ansible.builtin.stat:
-    path: "{{ naive_gateway_root }}/.git"
+    path: "/opt/naive-gateway/.git"
   register: naive_gateway_legacy_checkout
 
 - name: Require explicit migration of a legacy installation
@@ -101,9 +99,9 @@
     group: root
     mode: "0750"
   loop:
-    - "{{ naive_gateway_root }}"
-    - "{{ naive_gateway_root }}/releases"
-    - "{{ naive_gateway_config_dir }}"
+    - "/opt/naive-gateway"
+    - "/opt/naive-gateway/releases"
+    - "/etc/naive-gateway"
 
 - name: Recover an interrupted runtime transaction before preparing a new candidate
   ansible.builtin.command:
@@ -112,8 +110,8 @@
       - -c
       - "{{ lookup('ansible.builtin.file', role_path + '/../../../scripts/runtime_state.py') }}"
       - recover
-      - "{{ naive_gateway_root }}"
-      - "{{ naive_gateway_config_dir }}"
+      - "/opt/naive-gateway"
+      - "/etc/naive-gateway"
   changed_when: false
   no_log: true
 

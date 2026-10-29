@@ -2,7 +2,7 @@
 - name: Fetch the explicitly requested source ref
   ansible.builtin.git:
     repo: "{{ naive_gateway_repository }}"
-    dest: "{{ naive_gateway_root }}/repository"
+    dest: "/opt/naive-gateway/repository"
     version: "{{ naive_gateway_ref }}"
     depth: 1
     refspec: "{{ naive_gateway_ref if naive_gateway_ref is match('^[0-9a-f]{40}$') else omit }}"
@@ -14,7 +14,7 @@
 
 - name: Verify the resolved source commit
   ansible.builtin.command:
-    argv: [/usr/bin/git, -C, "{{ naive_gateway_root }}/repository", rev-parse, HEAD]
+    argv: [/usr/bin/git, -C, "/opt/naive-gateway/repository", rev-parse, HEAD]
   register: naive_gateway_commit
   changed_when: false
 
@@ -28,7 +28,7 @@
 
 - name: Derive candidate paths and image
   ansible.builtin.set_fact:
-    naive_gateway_release: "{{ naive_gateway_root }}/releases/{{ naive_gateway_commit.stdout }}"
+    naive_gateway_release: "/opt/naive-gateway/releases/{{ naive_gateway_commit.stdout }}"
     naive_gateway_image: "naive-gateway-caddy:git-{{ naive_gateway_commit.stdout }}"
 
 - name: Create the immutable release directory
@@ -52,16 +52,16 @@
         argv:
           - /usr/bin/git
           - -C
-          - "{{ naive_gateway_root }}/repository"
+          - "/opt/naive-gateway/repository"
           - archive
           - --format=tar
-          - "--output={{ naive_gateway_root }}/release.tar"
+          - "--output=/opt/naive-gateway/release.tar"
           - "{{ naive_gateway_commit.stdout }}"
       changed_when: true
 
     - name: Extract the candidate without touching active bind mounts
       ansible.builtin.unarchive:
-        src: "{{ naive_gateway_root }}/release.tar"
+        src: "/opt/naive-gateway/release.tar"
         dest: "{{ naive_gateway_release }}"
         remote_src: true
         owner: root
@@ -85,7 +85,7 @@
 
 - name: Record the runtime path for release-local operational commands
   ansible.builtin.copy:
-    content: "{{ naive_gateway_config_dir }}/gateway.env\n"
+    content: "/etc/naive-gateway/gateway.env\n"
     dest: "{{ naive_gateway_release }}/.runtime-env-path"
     owner: root
     group: root

@@ -42,3 +42,22 @@ def test_found_but_unexecutable_git_is_a_tooling_error(monkeypatch: pytest.Monke
     monkeypatch.setattr(tooling.subprocess, "run", fake_run)
     with pytest.raises(ToolingError, match="cannot run: git; check its architecture and PATH"):
         tooling.check_tooling(ROOT)
+
+
+@pytest.mark.parametrize("installed_version", [None, "0.0.0"])
+def test_declared_dependency_must_be_installed_at_its_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed_version: str | None
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\ndependencies = ["fixture[extra]==1.2.3"]\n[dependency-groups]\ndev = []\n'
+    )
+
+    def version(name: str) -> str:
+        assert name == "fixture"
+        if installed_version is None:
+            raise tooling.importlib.metadata.PackageNotFoundError(name)
+        return installed_version
+
+    monkeypatch.setattr(tooling.importlib.metadata, "version", version)
+    with pytest.raises(ToolingError, match="run 'make tooling'"):
+        tooling._check_python_versions(tmp_path)

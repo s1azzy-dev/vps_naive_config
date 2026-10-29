@@ -5,9 +5,9 @@ services:
     build:
       context: .
       args:
-        CADDY_VERSION: ${CADDY_VERSION:-2.11.4}
-        FORWARDPROXY_COMMIT: ${FORWARDPROXY_COMMIT:-d62c80d3dd2c706b6b87579844d2397bddd18317}
-    image: naive-gateway-caddy:${CADDY_VERSION:-2.11.4}
+        CADDY_VERSION: ${CADDY_VERSION:?Load versions.env}
+        FORWARDPROXY_COMMIT: ${FORWARDPROXY_COMMIT:?Load versions.env}
+    image: naive-gateway-caddy:${CADDY_VERSION:?Load versions.env}
     restart: unless-stopped
     environment:
       DOMAIN: ${DOMAIN:?DOMAIN is required}

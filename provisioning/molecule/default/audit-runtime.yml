@@ -3,8 +3,8 @@
   hosts: all
   gather_facts: false
   vars:
-    molecule_trust: /root/.molecule-phase4/local-root.crt
-    naive_gateway_repository: file:///root/phase7-source
+    molecule_trust: /root/.molecule-state/local-root.crt
+    naive_gateway_repository: file:///root/gateway-source
     naive_gateway_ref: "{{ molecule_updated_commit.stdout }}"
     naive_gateway_domain: smoke.localhost
     naive_gateway_acme_email: ci@example.com
@@ -105,7 +105,7 @@
 
     - name: Make source Git unavailable during restore
       ansible.builtin.command:
-        argv: [/bin/mv, /root/phase7-source, /root/phase7-source-offline]
+        argv: [/bin/mv, /root/gateway-source, /root/gateway-source-offline]
       changed_when: true
 
     - name: Restore the backup into a separate empty runtime using real Docker
@@ -153,7 +153,7 @@
     - name: Preserve the acceptance script before failure injection
       ansible.builtin.copy:
         src: /opt/naive-restored/current/scripts/check-server.sh
-        dest: /root/.molecule-phase4/check-server.saved
+        dest: /root/.molecule-state/check-server.saved
         remote_src: true
         owner: root
         group: root
@@ -177,7 +177,7 @@
 
     - name: Restore the actual acceptance script after failure injection
       ansible.builtin.copy:
-        src: /root/.molecule-phase4/check-server.saved
+        src: /root/.molecule-state/check-server.saved
         dest: /opt/naive-restored/current/scripts/check-server.sh
         remote_src: true
         owner: root
@@ -204,7 +204,7 @@
 
     - name: Restore source Git for the final fixture state
       ansible.builtin.command:
-        argv: [/bin/mv, /root/phase7-source-offline, /root/phase7-source]
+        argv: [/bin/mv, /root/gateway-source-offline, /root/gateway-source]
       changed_when: true
 
     - name: Reconcile the original deployment for final testinfra assertions

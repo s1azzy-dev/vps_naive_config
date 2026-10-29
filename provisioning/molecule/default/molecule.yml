@@ -5,7 +5,7 @@ ansible:
 driver:
   name: docker
 platforms:
-  - name: phase5-debian12
+  - name: gateway-debian12
     # Molecule uses this value only to derive a valid local image tag; the
     # actual base image is pinned by digest in Dockerfile.j2.
     image: debian:12-slim
@@ -21,7 +21,7 @@ provisioner:
   name: ansible
   inventory:
     host_vars:
-      phase5-debian12:
+      gateway-debian12:
         ansible_python_interpreter: /usr/bin/python3
         docker_test_fixture: true
         ssh_policy_test_connection: ['127.0.0.1', '12345', '127.0.0.1', '22']

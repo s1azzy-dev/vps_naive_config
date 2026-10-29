@@ -6,7 +6,7 @@
     - name: Save the valid SSH drop-in
       ansible.builtin.copy:
         src: /etc/ssh/sshd_config.d/00-naive-gateway-hardening.conf
-        dest: /root/.molecule-phase4/valid-ssh-drop-in
+        dest: /root/.molecule-state/valid-ssh-drop-in
         remote_src: true
         owner: root
         group: root
@@ -25,12 +25,17 @@
           ansible.builtin.fail:
             msg: Invalid SSH configuration unexpectedly passed validation
       rescue:
+        - name: Require a real SSH configuration rejection
+          ansible.builtin.assert:
+            that: "'previous configuration was restored' in (ansible_failed_result.msg | default(''))"
+            quiet: true
+
         - name: Compare the active drop-in with the saved valid copy
           ansible.builtin.command:
             argv:
               - /usr/bin/cmp
               - --silent
-              - /root/.molecule-phase4/valid-ssh-drop-in
+              - /root/.molecule-state/valid-ssh-drop-in
               - /etc/ssh/sshd_config.d/00-naive-gateway-hardening.conf
           changed_when: false
 
@@ -40,7 +45,7 @@
 
         - name: Record successful rejection for testinfra
           ansible.builtin.file:
-            path: /root/.molecule-phase4/invalid-ssh-rejected
+            path: /root/.molecule-state/invalid-ssh-rejected
             state: touch
             owner: root
             group: root
@@ -71,6 +76,11 @@
           ansible.builtin.fail:
             msg: Unmanaged UFW rule unexpectedly passed validation
       rescue:
+        - name: Require the unmanaged-rule refusal
+          ansible.builtin.assert:
+            that: "'Existing UFW rules are not managed' in (ansible_failed_result.msg | default(''))"
+            quiet: true
+
         - name: Remove the unmanaged test-only UFW rule
           community.general.ufw:
             rule: allow
@@ -80,7 +90,7 @@
 
         - name: Record successful UFW rejection for testinfra
           ansible.builtin.file:
-            path: /root/.molecule-phase4/unmanaged-ufw-rejected
+            path: /root/.molecule-state/unmanaged-ufw-rejected
             state: touch
             owner: root
             group: root
@@ -95,7 +105,7 @@
     - name: Save the valid IPv4 UFW after-rules
       ansible.builtin.copy:
         src: /etc/ufw/after.rules
-        dest: /root/.molecule-phase4/valid-ufw-after.rules
+        dest: /root/.molecule-state/valid-ufw-after.rules
         remote_src: true
         owner: root
         group: root
@@ -114,12 +124,19 @@
           ansible.builtin.fail:
             msg: Invalid Docker ingress rules unexpectedly passed validation
       rescue:
+        - name: Require rejection by the real IPv4 rules parser
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.results[0].rc != 0
+              - ansible_failed_result.results[0].cmd[0] == '/usr/sbin/iptables-restore'
+            quiet: true
+
         - name: Compare active after-rules with the saved valid copy
           ansible.builtin.command:
             argv:
               - /usr/bin/cmp
               - --silent
-              - /root/.molecule-phase4/valid-ufw-after.rules
+              - /root/.molecule-state/valid-ufw-after.rules
               - /etc/ufw/after.rules
           changed_when: false
 
@@ -135,7 +152,7 @@
 
         - name: Record successful Docker ingress rejection for testinfra
           ansible.builtin.file:
-            path: /root/.molecule-phase4/invalid-docker-ingress-rejected
+            path: /root/.molecule-state/invalid-docker-ingress-rejected
             state: touch
             owner: root
             group: root
@@ -286,7 +303,7 @@
     - name: Save the Docker management marker
       ansible.builtin.copy:
         src: /etc/naive-gateway/docker-managed
-        dest: /root/.molecule-phase4/docker-managed
+        dest: /root/.molecule-state/docker-managed
         remote_src: true
         owner: root
         group: root
@@ -307,9 +324,14 @@
           ansible.builtin.fail:
             msg: Unmanaged Docker installation unexpectedly passed validation
       rescue:
+        - name: Require the Docker adoption refusal
+          ansible.builtin.assert:
+            that: "'Existing Docker state is not marked as managed' in (ansible_failed_result.msg | default(''))"
+            quiet: true
+
         - name: Restore the Docker management marker
           ansible.builtin.copy:
-            src: /root/.molecule-phase4/docker-managed
+            src: /root/.molecule-state/docker-managed
             dest: /etc/naive-gateway/docker-managed
             remote_src: true
             owner: root
@@ -318,7 +340,7 @@
 
         - name: Record successful unmanaged Docker rejection for testinfra
           ansible.builtin.file:
-            path: /root/.molecule-phase4/unmanaged-docker-rejected
+            path: /root/.molecule-state/unmanaged-docker-rejected
             state: touch
             owner: root
             group: root
@@ -341,9 +363,14 @@
           ansible.builtin.fail:
             msg: Firewall unexpectedly accepted an unmanaged Docker installation
       rescue:
+        - name: Require the firewall ownership refusal
+          ansible.builtin.assert:
+            that: "'Docker is present without' in (ansible_failed_result.msg | default(''))"
+            quiet: true
+
         - name: Restore the Docker management marker after firewall refusal
           ansible.builtin.copy:
-            src: /root/.molecule-phase4/docker-managed
+            src: /root/.molecule-state/docker-managed
             dest: /etc/naive-gateway/docker-managed
             remote_src: true
             owner: root
@@ -352,7 +379,7 @@
 
         - name: Record successful firewall refusal for testinfra
           ansible.builtin.file:
-            path: /root/.molecule-phase4/unmanaged-docker-firewall-rejected
+            path: /root/.molecule-state/unmanaged-docker-firewall-rejected
             state: touch
             owner: root
             group: root
@@ -361,7 +388,7 @@
             access_time: preserve
 
 - name: Exercise gateway deployment and recovery
-  ansible.builtin.import_playbook: phase7.yml
+  ansible.builtin.import_playbook: deployment.yml
 
 - name: Exercise autonomous application recovery and rotation
   ansible.builtin.import_playbook: audit-runtime.yml

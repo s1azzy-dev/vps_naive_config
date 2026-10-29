@@ -11,7 +11,6 @@ from naive_gateway_controller.cli import main
 from naive_gateway_controller.config import GatewaySettings
 from naive_gateway_controller.network import NetworkReport
 from naive_gateway_controller.preflight import PreflightMode, PreflightReport
-from naive_gateway_controller.provisioning import BootstrapOutcome
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -65,11 +64,9 @@ def test_preflight_cli_renders_typed_report_without_network(
         return PreflightReport(
             network=NetworkReport(
                 vps_ipv4=("203.0.113.10",),
-                vps_ipv6=(),
                 domain_ipv4=("203.0.113.10",),
                 domain_ipv6=(),
                 ssh_target_reachable=True,
-                unreachable_domain_ipv6=(),
             ),
             mode=PreflightMode.MANAGED,
             known_host_added=False,
@@ -112,20 +109,6 @@ def test_make_init_is_private_and_never_overwrites(tmp_path: Path) -> None:
 
     assert repeated.returncode == 0, repeated.stderr
     assert config.read_text(encoding="utf-8").endswith("# preserve-me\n")
-
-
-def test_bootstrap_cli_reads_config_and_renders_skip(
-    config_factory: Callable[..., Path],
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(cli_module, "run_bootstrap", lambda _settings: BootstrapOutcome.SKIPPED)
-
-    assert main(["bootstrap", "--config", str(config_factory())]) == 0
-
-    captured = capsys.readouterr()
-    assert captured.out == ("Configuration: OK\nBootstrap: SKIP (managed host already hardened)\n")
-    assert captured.err == ""
 
 
 def test_deploy_cli_prints_endpoint_without_credentials(

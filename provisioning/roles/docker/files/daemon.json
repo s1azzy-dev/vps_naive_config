@@ -1,0 +1,11 @@
+{
+  "allow-direct-routing": false,
+  "default-network-opts": {
+    "bridge": {
+      "com.docker.network.bridge.host_binding_ipv4": "127.0.0.1"
+    }
+  },
+  "firewall-backend": "iptables",
+  "ip6tables": true,
+  "iptables": true
+}

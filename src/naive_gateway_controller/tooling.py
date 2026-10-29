@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import cast
 
@@ -15,19 +16,9 @@ import yaml
 
 from naive_gateway_controller.errors import ToolingError
 
-EXPECTED_VERSIONS = {
-    "ansible-core": "2.21.2",
-    "ansible-lint": "26.6.0",
-    "molecule": "26.6.0",
-    "molecule-plugins": "26.7.15",
-    "passlib": "1.7.4",
-    "pytest-testinfra": "10.2.2",
-    "uv": "0.12.5",
-}
-
 
 def project_root() -> Path:
-    """Return the repository root for an editable or wheel installation."""
+    """Return the repository root of this editable checkout."""
     return Path(__file__).resolve().parents[2]
 
 
@@ -106,7 +97,7 @@ def install_collections(root: Path | None = None) -> None:
     (root / ".ansible/collections").mkdir(parents=True, exist_ok=True)
     (root / ".ansible/tmp").mkdir(parents=True, exist_ok=True)
     if not collections:
-        print("No Ansible collections are required in the current phase.")
+        print("No Ansible collections are declared.")
         return
     command = [
         str(Path(sys.prefix) / "bin/ansible-galaxy"),
@@ -164,6 +155,28 @@ def _check_collection_versions(root: Path) -> None:
             raise ToolingError(f"Ansible collection {name} does not match exact pin {version}")
 
 
+def _check_python_versions(root: Path) -> None:
+    """Check the declared direct dependencies without maintaining a second pin list."""
+    try:
+        project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        requirements = project["project"]["dependencies"] + project["dependency-groups"]["dev"]
+        for requirement in requirements:
+            distribution, expected = requirement.split("==")
+            distribution = distribution.split("[", 1)[0]
+            try:
+                actual = importlib.metadata.version(distribution)
+            except importlib.metadata.PackageNotFoundError as error:
+                raise ToolingError(
+                    f"run 'make tooling'; missing Python package: {distribution}"
+                ) from error
+            if actual != expected:
+                raise ToolingError(
+                    f"run 'make tooling'; installed {distribution} {actual} does not match {expected}"
+                )
+    except (OSError, ValueError, KeyError) as error:
+        raise ToolingError("cannot read exact dependency pins from pyproject.toml") from error
+
+
 def check_tooling(root: Path | None = None) -> None:
     """Verify system commands, locked Python tools, OpenSSH, and collections."""
     root = root or project_root()
@@ -205,17 +218,7 @@ def check_tooling(root: Path | None = None) -> None:
     )
     if openssh.returncode != 0:
         raise ToolingError("OpenSSH client does not support StrictHostKeyChecking=accept-new")
-    for distribution, expected in EXPECTED_VERSIONS.items():
-        try:
-            actual = importlib.metadata.version(distribution)
-        except importlib.metadata.PackageNotFoundError as error:
-            raise ToolingError(
-                f"run 'make tooling'; missing Python package: {distribution}"
-            ) from error
-        if actual != expected:
-            raise ToolingError(
-                f"installed {distribution} {actual} does not match exact pin {expected}"
-            )
+    _check_python_versions(root)
     uv_binary = Path(sys.prefix) / "bin/uv"
     uv_environment = os.environ.copy()
     uv_environment["UV_CACHE_DIR"] = str(root / ".ansible/uv-cache")
@@ -231,8 +234,4 @@ def check_tooling(root: Path | None = None) -> None:
     if lock_check.returncode != 0:
         raise ToolingError("uv.lock is missing or out of sync with pyproject.toml")
     _check_collection_versions(root)
-    print(
-        "Tooling: OK "
-        f"(uv {EXPECTED_VERSIONS['uv']}, ansible-core {EXPECTED_VERSIONS['ansible-core']}, "
-        f"ansible-lint {EXPECTED_VERSIONS['ansible-lint']})",
-    )
+    print("Tooling: OK (Python 3.14, locked dependencies and Ansible collections)")

@@ -5,7 +5,7 @@
   gather_facts: false
   vars:
     molecule_repo_root: "{{ lookup('ansible.builtin.env', 'MOLECULE_PROJECT_DIRECTORY') }}/.."
-    molecule_image_archive: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/phase7-image.tar"
+    molecule_image_archive: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/gateway-image.tar"
     molecule_versions: >-
       {{ dict(lookup('ansible.builtin.file', molecule_repo_root + '/versions.env').splitlines() |
          reject('match', '^(#|$)') | map('split', '=', 1)) }}
@@ -34,8 +34,8 @@
   gather_facts: true
   vars:
     molecule_repo_root: "{{ lookup('ansible.builtin.env', 'MOLECULE_PROJECT_DIRECTORY') }}/.."
-    molecule_image_archive: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/phase7-image.tar"
-    naive_gateway_repository: file:///root/phase7-source
+    molecule_image_archive: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/gateway-image.tar"
+    naive_gateway_repository: file:///root/gateway-source
     naive_gateway_ref: "{{ molecule_good_commit.stdout }}"
     naive_gateway_domain: smoke.localhost
     naive_gateway_acme_email: ci@example.com
@@ -49,11 +49,11 @@
     - name: Inspect the nested test daemon
       ansible.builtin.command:
         argv: [/usr/bin/docker, info]
-      register: molecule_phase7_daemon
+      register: molecule_deployment_daemon
       changed_when: false
       failed_when: false
 
-    - name: Recover the disposable daemon for a focused Phase 7 retry
+    - name: Recover the disposable daemon for a focused gateway deployment retry
       ansible.builtin.command:
         argv:
           - /usr/bin/dockerd
@@ -63,13 +63,13 @@
       async: 7200
       poll: 0
       changed_when: true
-      when: molecule_phase7_daemon.rc != 0
+      when: molecule_deployment_daemon.rc != 0
 
     - name: Wait for the nested test daemon to respond
       ansible.builtin.command:
         argv: [/usr/bin/docker, info]
-      register: molecule_phase7_ready
-      until: molecule_phase7_ready.rc == 0
+      register: molecule_deployment_ready
+      until: molecule_deployment_ready.rc == 0
       retries: 60
       delay: 1
       changed_when: false
@@ -77,14 +77,14 @@
     - name: Transfer the real Caddy image to the isolated instance
       ansible.builtin.copy:
         src: "{{ molecule_image_archive }}"
-        dest: /root/phase7-image.tar
+        dest: /root/gateway-image.tar
         owner: root
         group: root
         mode: "0600"
 
     - name: Import the Caddy test image into the nested daemon
       ansible.builtin.command:
-        argv: [/usr/bin/docker, image, load, --input, /root/phase7-image.tar]
+        argv: [/usr/bin/docker, image, load, --input, /root/gateway-image.tar]
       changed_when: true
 
     - name: Find only disposable gateway containers from a previous focused run
@@ -99,19 +99,19 @@
       loop: "{{ molecule_previous_gateways.stdout_lines }}"
       changed_when: true
 
-    - name: Reset only the isolated Phase 7 source and deployment state
+    - name: Reset only the isolated gateway deployment source and deployment state
       ansible.builtin.file:
         path: "{{ item }}"
         state: absent
       loop:
-        - /root/phase7-source
+        - /root/gateway-source
         - /opt/naive-gateway
         - /etc/naive-gateway/gateway.env
         - /etc/naive-gateway/gateway.env.pending
 
     - name: Create the disposable source repository
       ansible.builtin.file:
-        path: /root/phase7-source
+        path: /root/gateway-source
         state: directory
         owner: root
         group: root
@@ -120,7 +120,7 @@
     - name: Copy current uncommitted runtime sources into the isolated repository
       ansible.builtin.copy:
         src: "{{ molecule_repo_root }}/{{ item }}{{ '/' if item in ['scripts', 'site'] else '' }}"
-        dest: "/root/phase7-source/{{ item }}"
+        dest: "/root/gateway-source/{{ item }}"
         owner: root
         group: root
         mode: preserve
@@ -129,21 +129,21 @@
     - name: Use the test seed image to avoid rebuilding Caddy inside vfs
       ansible.builtin.copy:
         content: "FROM naive-gateway-molecule-caddy\n"
-        dest: /root/phase7-source/Dockerfile
+        dest: /root/gateway-source/Dockerfile
         owner: root
         group: root
         mode: "0644"
 
     - name: Replace public ACME only for the isolated test domain
       ansible.builtin.replace:
-        path: /root/phase7-source/Caddyfile
+        path: /root/gateway-source/Caddyfile
         regexp: 'tls \{\$ACME_EMAIL\}'
         replace: tls internal
 
     - name: Commit the valid test source
       ansible.builtin.command:
         argv: "{{ item }}"
-        chdir: /root/phase7-source
+        chdir: /root/gateway-source
       environment: "{{ molecule_git_environment }}"
       loop:
         - [git, init, --initial-branch=main]
@@ -153,25 +153,25 @@
 
     - name: Record the valid source commit
       ansible.builtin.command:
-        argv: [git, -C, /root/phase7-source, rev-parse, HEAD]
+        argv: [git, -C, /root/gateway-source, rev-parse, HEAD]
       register: molecule_good_commit
       changed_when: false
 
     - name: Introduce a genuinely invalid Caddy directive
       ansible.builtin.lineinfile:
-        path: /root/phase7-source/Caddyfile
+        path: /root/gateway-source/Caddyfile
         insertafter: '^\s*encode zstd gzip$'
-        line: "\tinvalid_phase7_directive"
+        line: "\tinvalid_gateway_directive"
 
     - name: Commit the invalid candidate
       ansible.builtin.command:
-        argv: [git, -C, /root/phase7-source, commit, --all, --message, Invalid Caddy fixture]
+        argv: [git, -C, /root/gateway-source, commit, --all, --message, Invalid Caddy fixture]
       environment: "{{ molecule_git_environment }}"
       changed_when: true
 
     - name: Record the invalid source commit
       ansible.builtin.command:
-        argv: [git, -C, /root/phase7-source, rev-parse, HEAD]
+        argv: [git, -C, /root/gateway-source, rev-parse, HEAD]
       register: molecule_bad_commit
       changed_when: false
 
@@ -291,23 +291,23 @@
 
     - name: Restore a valid Caddy source
       ansible.builtin.command:
-        argv: [git, -C, /root/phase7-source, checkout, "{{ molecule_good_commit.stdout }}", --, Caddyfile]
+        argv: [git, -C, /root/gateway-source, checkout, "{{ molecule_good_commit.stdout }}", --, Caddyfile]
       changed_when: true
 
     - name: Introduce a new reviewed website revision
       ansible.builtin.lineinfile:
-        path: /root/phase7-source/site/index.html
-        line: '<!-- phase7 updated release -->'
+        path: /root/gateway-source/site/index.html
+        line: '<!-- gateway updated release -->'
 
     - name: Commit the new valid source
       ansible.builtin.command:
-        argv: [git, -C, /root/phase7-source, commit, --all, --message, Updated valid gateway fixture]
+        argv: [git, -C, /root/gateway-source, commit, --all, --message, Updated valid gateway fixture]
       environment: "{{ molecule_git_environment }}"
       changed_when: true
 
     - name: Record the updated source commit
       ansible.builtin.command:
-        argv: [git, -C, /root/phase7-source, rev-parse, HEAD]
+        argv: [git, -C, /root/gateway-source, rev-parse, HEAD]
       register: molecule_updated_commit
       changed_when: false
 
@@ -326,7 +326,7 @@
     - name: Require the new source to be active
       ansible.builtin.assert:
         that:
-          - "'phase7 updated release' in molecule_updated_site.stdout"
+          - "'gateway updated release' in molecule_updated_site.stdout"
           - naive_gateway_commit.stdout == molecule_updated_commit.stdout
 
     - name: Inspect the final runtime env
@@ -343,7 +343,7 @@
     - name: Record completed deployment boundary assertions for testinfra
       ansible.builtin.copy:
         content: "{{ molecule_updated_commit.stdout }}\n"
-        dest: /root/.molecule-phase4/gateway-deployment-verified
+        dest: /root/.molecule-state/gateway-deployment-verified
         owner: root
         group: root
         mode: "0600"

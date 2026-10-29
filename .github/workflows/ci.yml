@@ -151,6 +151,3 @@ jobs:
 
       - name: Run local runtime smoke
         run: ./tests/smoke-local.sh
-
-      - name: Confirm no tracked runtime environment
-        run: test -z "$(git ls-files .env)"

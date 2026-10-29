@@ -34,9 +34,9 @@ help:
 		'  make tooling-check Verify controller commands and pinned tool versions' \
 		'  make check-config  Validate local .env without connecting to a VPS' \
 		'  make preflight     Read-only DNS, TCP, host-key, and SSH readiness checks' \
-		'  make bootstrap     Create the user, harden SSH, and configure UFW' \
+		'  make bootstrap     Reconcile the user, SSH and host/Docker firewall' \
 		'  make deploy        Deploy and check the gateway on a managed VPS' \
-		'  make provision     Bootstrap if needed, deploy, verify and display credentials' \
+		'  make provision     Reconcile the host, deploy, verify and display credentials' \
 		'  make verify        Verify SSH, firewall, Docker and gateway without reconfiguration' \
 		'  make credentials   Display current credentials in an interactive terminal' \
 		'  make restore BACKUP_FILE=/absolute/backup.tar.gz  Restore onto a managed empty VPS without Git' \
@@ -53,7 +53,7 @@ help:
 		'Project checks:' \
 		'  make lint          Run Ruff, mypy, shell, and Ansible static checks' \
 		'  make ansible-check Run Ansible syntax and production lint checks' \
-		'  make molecule      Run isolated bootstrap/SSH/UFW/Docker role tests' \
+		'  make molecule      Run isolated host/deployment/recovery integration tests' \
 		'  make test          Run the pytest suite'
 
 init:
