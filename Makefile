@@ -7,7 +7,7 @@ RUNTIME_ENV ?= $(if $(wildcard .runtime-env-path),$(shell cat .runtime-env-path)
 COMPOSE := env -u DOMAIN -u ACME_EMAIL -u NAIVE_USER -u NAIVE_PASSWORD -u CADDY_VERSION -u FORWARDPROXY_COMMIT docker compose --env-file versions.env --env-file "$(RUNTIME_ENV)" -f compose.yml $(if $(wildcard deployment.yml),-f deployment.yml)
 VENV_DIR ?= .venv
 PYTHON ?= python3
-UV_VERSION := 0.12.5
+UV_VERSION := 0.13.6
 UV_CACHE_DIR := $(CURDIR)/.ansible/uv-cache
 ifneq ($(filter /%,$(VENV_DIR)),)
 VENV_PATH := $(VENV_DIR)

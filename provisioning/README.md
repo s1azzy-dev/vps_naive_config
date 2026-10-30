@@ -79,7 +79,8 @@ DOCKER_HOST="$(docker context inspect --format '{{.Endpoints.docker.Host}}')" ma
 ```
 
 Отдельный Caddy smoke использует production Dockerfile/Caddyfile/site и local
-issuer вместо публичного ACME. В корне проекта создайте временный env и соберите image:
+issuer вместо публичного ACME. Нужны Docker, OpenSSL и curl с HTTP/2 и
+`--proxy-http2`. В корне проекта создайте временный env и соберите image:
 
 ```bash
 smoke_env=$(mktemp)
@@ -94,7 +95,10 @@ rm -f "$smoke_env"
 Временные значения тестовые, `.env` владельца не используется. Smoke выбирает
 image по `versions.env`; `SMOKE_IMAGE` позволяет явно выбрать другой собранный
 image. Проверяются site, sitemap/robots, TLS/HTTP2, CONNECT с credentials и отказ
-без них, отсутствие proxy destinations в логах. Тестовые containers/files удаляются.
+без них, отсутствие proxy destinations в логах. Затем только в тестовом контейнере
+read-body idle timeout сокращается до 1 секунды и разрешается local origin:
+authenticated CONNECT по HTTP/2 должен получить его ответ после паузы 3 секунды.
+Production Caddyfile не меняется. Тестовые containers/files удаляются.
 
 GitHub Actions отдельно запускает lint, pytest, Molecule и Caddy smoke, без VPS
 credentials. Проверки source config и настоящего runtime сохраняют разные границы;

@@ -43,7 +43,8 @@ flowchart LR
 
 ## 1. Подготовить компьютер и VPS
 
-На компьютере нужны Python **3.14**, Git, Make и OpenSSH (`ssh`, `ssh-keygen`).
+На компьютере нужны Python **3.14.10** (patch закреплён в `.python-version`), Git,
+Make и OpenSSH (`ssh`, `ssh-keygen`).
 Ansible и остальные Python-инструменты установятся в локальную `.venv`.
 Docker на компьютере нужен для интеграционных тестов, для самой установки он не нужен.
 
@@ -183,6 +184,9 @@ sudo -k true
    Подготовленный `gateway.env.pending` сохраняется для повтора после прерывания.
 5. Проверяет Compose boundary, собирает закреплённый Caddy image и выполняет
    `caddy validate` без подключения действующих certificate volumes.
+   При сборке Dockerfile скачивает Caddy и forwardproxy по `versions.env`,
+   применяет upstream-патчи QUIC и idle timeout из этого же commit forwardproxy
+   и собирает единый бинарник через xcaddy. Исходники и Go остаются в build stage.
 6. Сохраняет предыдущие env/release, атомарно активирует env и ожидает health Caddy.
 7. Проверяет публичный HTTPS и `check-server.sh`: сайт, TLS/HTTP2, CONNECT с
    авторизацией, явный отказ без неё и отсутствие proxy destinations в логах.
