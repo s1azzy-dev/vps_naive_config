@@ -167,7 +167,7 @@
     mode: "0644"
   register: docker_repository
 
-- name: Install Docker Engine and Compose v2
+- name: Install Docker Engine and the Compose plugin
   ansible.builtin.apt:
     name: "{{ docker_packages }}"
     state: present
@@ -191,7 +191,7 @@
 - name: Apply a changed Docker daemon configuration
   ansible.builtin.meta: flush_handlers
 
-- name: Verify Docker Engine and Compose v2 commands
+- name: Verify Docker Engine and Compose commands
   ansible.builtin.command:
     argv: "{{ item }}"
   loop:

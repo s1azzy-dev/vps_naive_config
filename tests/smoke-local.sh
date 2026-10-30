@@ -98,4 +98,37 @@ if grep -Fq 'example.com' "$TMP_DIR/container.log"; then
   exit 1
 fi
 
+# Accelerate the idle deadline only in this disposable container. The origin
+# waits three seconds after receiving a request, longer than the one-second
+# body timeout. A working authenticated HTTP/2 CONNECT must survive the pause.
+awk '{ print }
+  /protocols h1 h2/ { print "        timeouts {\n            read_body_idle 1s\n        }" }
+  /probe_resistance/ { print "        acl {\n            allow 127.0.0.1\n        }" }
+' "$SMOKE_CADDYFILE" > "$TMP_DIR/idle.Caddyfile"
+docker cp "$TMP_DIR/idle.Caddyfile" "$CONTAINER:/tmp/idle.Caddyfile" >/dev/null
+docker exec "$CONTAINER" caddy fmt --overwrite /tmp/idle.Caddyfile
+docker exec "$CONTAINER" caddy reload --config /tmp/idle.Caddyfile --adapter caddyfile >/dev/null
+cat > "$TMP_DIR/idle-origin.sh" <<'ORIGIN'
+#!/bin/sh
+while IFS= read -r line && [ "$line" != "$(printf '\r')" ]; do :; done
+sleep 3
+printf 'HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nidle-pass'
+ORIGIN
+chmod +x "$TMP_DIR/idle-origin.sh"
+docker cp "$TMP_DIR/idle-origin.sh" "$CONTAINER:/tmp/idle-origin.sh" >/dev/null
+docker exec -d "$CONTAINER" nc -lk -s 127.0.0.1 -p 18080 -e /tmp/idle-origin.sh
+curl --fail --silent --show-error --verbose --proxy-http2 --proxytunnel \
+  --noproxy '' --proxy-insecure --max-time 15 "${resolve_smoke[@]}" \
+  --proxy "https://${SMOKE_HOST}:${PORT}" \
+  --proxy-user "${USER_VALUE}:${PASSWORD_VALUE}" \
+  http://127.0.0.1:18080/ -o "$TMP_DIR/idle.body" 2>"$TMP_DIR/idle.trace" || {
+    cat "$TMP_DIR/idle.trace" >&2
+    exit 1
+  }
+grep -Fq 'CONNECT tunnel: HTTP/2 negotiated' "$TMP_DIR/idle.trace" || {
+  cat "$TMP_DIR/idle.trace" >&2
+  exit 1
+}
+grep -Fxq 'idle-pass' "$TMP_DIR/idle.body"
+
 printf 'Local Caddy runtime smoke passed.\n'
