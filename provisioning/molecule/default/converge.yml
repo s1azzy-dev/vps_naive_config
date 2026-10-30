@@ -1,5 +1,5 @@
 ---
-- name: Exercise the production Phase 4 bootstrap playbook
+- name: Exercise the production host bootstrap playbook
   ansible.builtin.import_playbook: ../../playbooks/bootstrap.yml
   vars:
     bootstrap_target: all
@@ -10,7 +10,7 @@
     ssh_policy_test_connection: ['127.0.0.1', '12345', '127.0.0.1', '22']
     molecule_managed_user: molecule_admin
     molecule_public_key: >-
-      ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOZGc3eD7DMtNLskGutOfXw7ZmiK4B9Hl0+7wYs2qIib molecule-phase4
+      ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOZGc3eD7DMtNLskGutOfXw7ZmiK4B9Hl0+7wYs2qIib molecule-bootstrap
     molecule_password_file: "{{ molecule_ephemeral_directory }}/managed-password"
     molecule_password: >-
       {{ lookup('ansible.builtin.password', molecule_password_file, length=32) }}
@@ -21,7 +21,7 @@
     user_password_hash: "{{ molecule_password_hash }}"
     user_authorized_key: "{{ molecule_public_key }}"
 
-- name: Record Phase 4 state for testinfra
+- name: Record host state for testinfra
   hosts: all
   gather_facts: false
   vars:
@@ -32,7 +32,7 @@
   tasks:
     - name: Create private Molecule assertion state
       ansible.builtin.file:
-        path: /root/.molecule-phase4
+        path: /root/.molecule-state
         state: directory
         owner: root
         group: root
@@ -65,7 +65,7 @@
     - name: Preserve the initial password hash for the idempotence assertion
       ansible.builtin.copy:
         content: "{{ molecule_shadow_entry.stdout.split(':')[1] }}\n"
-        dest: /root/.molecule-phase4/initial-password-hash
+        dest: /root/.molecule-state/initial-password-hash
         owner: root
         group: root
         mode: "0600"

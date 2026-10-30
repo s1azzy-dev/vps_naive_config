@@ -16,7 +16,6 @@ from naive_gateway_controller.errors import ProvisioningError
 from naive_gateway_controller.network import NetworkReport
 from naive_gateway_controller.preflight import PreflightMode, PreflightReport
 from naive_gateway_controller.provisioning import (
-    BootstrapOutcome,
     execute_ansible,
     hash_sudo_password,
     prompt_sudo_password,
@@ -87,11 +86,9 @@ class RecordingExecutor:
 def _network() -> NetworkReport:
     return NetworkReport(
         vps_ipv4=("192.0.2.10",),
-        vps_ipv6=(),
         domain_ipv4=("192.0.2.10",),
         domain_ipv6=(),
         ssh_target_reachable=True,
-        unreachable_domain_ipv6=(),
     )
 
 
@@ -160,7 +157,7 @@ def test_new_host_bootstrap_applies_user_then_requires_safe_post_checks(
     )
     executor = RecordingExecutor()
 
-    outcome = run_bootstrap(
+    run_bootstrap(
         settings,
         root=tmp_path,
         password_prompt=lambda: password,
@@ -170,7 +167,6 @@ def test_new_host_bootstrap_applies_user_then_requires_safe_post_checks(
         ansible_executor=executor,
     )
 
-    assert outcome is BootstrapOutcome.APPLIED
     assert executor.variables["bootstrap_apply_user"] is True
     assert executor.variables["managed_become_password"] == password
     assert executor.variables["bootstrap_become_password"] == ""
@@ -223,7 +219,7 @@ def test_managed_host_skips_root_bootstrap_but_applies_later_host_roles(
         SSHProbeResult(SSHStatus.AUTH_FAILED),
     )
 
-    outcome = run_bootstrap(
+    run_bootstrap(
         settings,
         root=tmp_path,
         password_prompt=lambda: "existing-managed-password",
@@ -233,7 +229,6 @@ def test_managed_host_skips_root_bootstrap_but_applies_later_host_roles(
         ansible_executor=executor,
     )
 
-    assert outcome is BootstrapOutcome.APPLIED
     assert executor.variables["bootstrap_apply_user"] is False
     assert executor.variables["firewall_ssh_port"] == settings.vps_port
     assert key_probe.users == ["root", "slazzy", "root"]
@@ -312,10 +307,10 @@ def test_provision_reuses_one_password_across_bootstrap_deploy_and_verify(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    phases: list[tuple[str, str]] = []
+    steps: list[tuple[str, str]] = []
     password = "single-sudo-password"
     monkeypatch.setattr(
-        provisioning_module, "check_playbook_syntax", lambda _root: phases.append(("syntax", ""))
+        provisioning_module, "check_playbook_syntax", lambda _root: steps.append(("syntax", ""))
     )
     monkeypatch.setattr(provisioning_module, "run_preflight", _preflight(PreflightMode.BOOTSTRAP))
     monkeypatch.setattr(provisioning_module, "prompt_sudo_password", lambda: password)
@@ -324,7 +319,7 @@ def test_provision_reuses_one_password_across_bootstrap_deploy_and_verify(
         def run(_settings: GatewaySettings, **kwargs: object) -> None:
             prompt = kwargs["password_prompt"]
             assert callable(prompt)
-            phases.append((name, prompt()))
+            steps.append((name, prompt()))
 
         return run
 
@@ -333,7 +328,7 @@ def test_provision_reuses_one_password_across_bootstrap_deploy_and_verify(
     monkeypatch.setattr(provisioning_module, "run_verify", fake_stage("verify"))
 
     assert run_provision(settings, root=tmp_path) == password
-    assert phases == [
+    assert steps == [
         ("syntax", ""),
         ("bootstrap", password),
         ("deploy", password),
@@ -413,9 +408,9 @@ def test_provision_reconciles_firewall_even_when_ssh_is_hardened(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    phases: list[str] = []
+    steps: list[str] = []
     monkeypatch.setattr(
-        provisioning_module, "check_playbook_syntax", lambda _root: phases.append("syntax")
+        provisioning_module, "check_playbook_syntax", lambda _root: steps.append("syntax")
     )
     monkeypatch.setattr(provisioning_module, "run_preflight", _preflight(PreflightMode.MANAGED))
     monkeypatch.setattr(
@@ -429,7 +424,7 @@ def test_provision_reconciles_firewall_even_when_ssh_is_hardened(
             prompt = kwargs["password_prompt"]
             assert callable(prompt)
             assert prompt() == "existing"
-            phases.append(name)
+            steps.append(name)
 
         return run
 
@@ -438,7 +433,7 @@ def test_provision_reconciles_firewall_even_when_ssh_is_hardened(
     monkeypatch.setattr(provisioning_module, "run_verify", run_stage("verify"))
 
     assert run_provision(settings, root=tmp_path) == "existing"
-    assert phases == ["syntax", "bootstrap", "deploy", "verify"]
+    assert steps == ["syntax", "bootstrap", "deploy", "verify"]
 
 
 def test_read_credentials_passes_sudo_password_only_via_stdin(

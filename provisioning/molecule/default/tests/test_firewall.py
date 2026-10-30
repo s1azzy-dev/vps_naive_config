@@ -34,7 +34,7 @@ def test_ufw_is_active_with_only_expected_host_ports(host: object) -> None:
 
 
 def test_unmanaged_ufw_rule_was_rejected(host: object) -> None:
-    assert host.file("/root/.molecule-phase4/unmanaged-ufw-rejected").is_file
+    assert host.file("/root/.molecule-state/unmanaged-ufw-rejected").is_file
 
 
 def test_docker_ingress_policy_is_loaded_for_ipv4_and_ipv6(host: object) -> None:
@@ -77,5 +77,5 @@ def test_docker_ingress_blocks_are_exact_and_private(host: object) -> None:
 
 
 def test_invalid_docker_ingress_template_was_rejected(host: object) -> None:
-    marker = host.file("/root/.molecule-phase4/invalid-docker-ingress-rejected")
+    marker = host.file("/root/.molecule-state/invalid-docker-ingress-rejected")
     assert marker.is_file

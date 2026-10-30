@@ -30,12 +30,12 @@ def release(root: Path, commit: str) -> Path:
     return path
 
 
-@pytest.mark.parametrize("stage", ["env", "compose", "health", "public"])
+@pytest.mark.parametrize("candidate_started", [False, True])
 def test_failed_updates_recover_env_release_and_container(
     runtime_modules: tuple[ModuleType, ModuleType, ModuleType],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    stage: str,
+    candidate_started: bool,
 ) -> None:
     module, _, _ = runtime_modules
     root = tmp_path / "gateway"
@@ -59,7 +59,7 @@ def test_failed_updates_recover_env_release_and_container(
     state.begin(candidate)
     assert (state.recovery / "previous.env").read_bytes() == old_env
     module.atomic_write(state.env, new_env)
-    if stage != "env":
+    if candidate_started:
         state.compose(candidate, state.env, ["up", "-d"])
     # A new controller process must use the on-disk snapshot, not old in-memory facts.
     module.RuntimeState(root, config).recover()

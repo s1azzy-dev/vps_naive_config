@@ -9,7 +9,6 @@ from naive_gateway_controller.network import NetworkReport, collect_report, vali
 def test_matching_ipv4_and_reachable_ssh() -> None:
     records = {
         ("vps.example", "A"): ("192.0.2.10",),
-        ("vps.example", "AAAA"): (),
         ("proxy.example", "A"): ("192.0.2.10",),
         ("proxy.example", "AAAA"): (),
     }
@@ -47,7 +46,6 @@ def test_ipv4_literal_does_not_require_vps_dns() -> None:
 def test_aaaa_is_rejected_before_connections_even_if_ipv6_is_reachable(host: str) -> None:
     records = {
         ("vps.example", "A"): ("192.0.2.10",),
-        ("vps.example", "AAAA"): ("2001:db8::10",),
         ("proxy.example", "A"): ("192.0.2.10",),
         ("proxy.example", "AAAA"): ("2001:db8::10",),
     }
@@ -70,25 +68,15 @@ def test_aaaa_is_rejected_before_connections_even_if_ipv6_is_reachable(host: str
         ({"domain_ipv4": ()}, "at least one A record"),
         ({"domain_ipv4": ("198.51.100.20",)}, "A records do not match"),
         ({"domain_ipv6": ("2001:db8::20",)}, "no AAAA records"),
-        (
-            {
-                "vps_ipv6": ("2001:db8::10",),
-                "domain_ipv6": ("2001:db8::10",),
-                "unreachable_domain_ipv6": ("2001:db8::10",),
-            },
-            "no AAAA records",
-        ),
         ({"ssh_target_reachable": False}, "SSH port is unreachable"),
     ],
 )
 def test_invalid_network_reports_are_blocked(changes: dict[str, object], expected: str) -> None:
     values: dict[str, object] = {
         "vps_ipv4": ("192.0.2.10",),
-        "vps_ipv6": (),
         "domain_ipv4": ("192.0.2.10",),
         "domain_ipv6": (),
         "ssh_target_reachable": True,
-        "unreachable_domain_ipv6": (),
     }
     values.update(changes)
     report = NetworkReport(**values)  # type: ignore[arg-type]

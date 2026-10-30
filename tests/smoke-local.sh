@@ -2,7 +2,10 @@
 set -Eeuo pipefail
 
 ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-IMAGE=${SMOKE_IMAGE:-naive-gateway-caddy:2.11.4}
+# shellcheck source=../versions.env
+# shellcheck disable=SC1091
+source "$ROOT_DIR/versions.env"
+IMAGE=${SMOKE_IMAGE:-naive-gateway-caddy:$CADDY_VERSION}
 PORT=${SMOKE_PORT:-18443}
 CONTAINER="naive-gateway-smoke-$$"
 USER_VALUE=0011223344556677

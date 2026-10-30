@@ -1,4 +1,6 @@
-ARG CADDY_VERSION=2.11.4
+# check=skip=InvalidDefaultArgInFrom
+# CADDY_VERSION is required; supported builds pass it from versions.env.
+ARG CADDY_VERSION
 FROM caddy:${CADDY_VERSION}-builder-alpine AS builder
 
 ARG CADDY_VERSION

@@ -7,7 +7,7 @@ import testinfra.utils.ansible_runner
 MANAGED_USER = "molecule_admin"
 PUBLIC_KEY = (
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOZGc3eD7DMtNLskGutOfXw7ZmiK4B9Hl0+7wYs2qIib "
-    "molecule-phase4"
+    "molecule-bootstrap"
 )
 DROP_IN = "/etc/ssh/sshd_config.d/00-naive-gateway-hardening.conf"
 
@@ -44,7 +44,7 @@ def test_authorized_key_is_exact_and_private(host: object) -> None:
 
 
 def test_second_run_preserves_password_hash(host: object) -> None:
-    initial = host.file("/root/.molecule-phase4/initial-password-hash").content_string.strip()
+    initial = host.file("/root/.molecule-state/initial-password-hash").content_string.strip()
     current = host.run(f"getent shadow {MANAGED_USER}").stdout.split(":", maxsplit=2)[1]
     assert initial.startswith("$")
     assert current == initial
@@ -70,5 +70,5 @@ def test_ssh_hardening_is_valid_and_effective(host: object) -> None:
 
 
 def test_invalid_ssh_template_was_rejected(host: object) -> None:
-    assert host.file("/root/.molecule-phase4/invalid-ssh-rejected").is_file
+    assert host.file("/root/.molecule-state/invalid-ssh-rejected").is_file
     assert host.run("/usr/sbin/sshd -t").rc == 0

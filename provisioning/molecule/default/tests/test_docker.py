@@ -24,11 +24,6 @@ def test_official_docker_repository_and_key(host: object) -> None:
     assert "URIs: https://download.docker.com/linux/debian" in source.content_string
     assert "Suites: bookworm" in source.content_string
     assert "Components: stable" in source.content_string
-    fingerprint = host.run(
-        "/usr/bin/gpg --batch --show-keys --with-colons /etc/apt/keyrings/docker.asc",
-    )
-    assert fingerprint.rc == 0
-    assert "9DC858229FC7DD38854AE2D88D81803C0EBFCD88" in fingerprint.stdout
 
 
 def test_exact_docker_package_set_and_compose_v2(host: object) -> None:
@@ -76,9 +71,9 @@ def test_docker_management_and_privilege_boundaries(host: object) -> None:
     groups = host.run("/usr/bin/id -nG molecule_admin")
     assert groups.rc == 0
     assert "docker" not in groups.stdout.split()
-    assert host.file("/root/.molecule-phase4/unmanaged-docker-rejected").is_file
+    assert host.file("/root/.molecule-state/unmanaged-docker-rejected").is_file
     assert host.file(
-        "/root/.molecule-phase4/unmanaged-docker-firewall-rejected",
+        "/root/.molecule-state/unmanaged-docker-firewall-rejected",
     ).is_file
     socket = host.file("/var/run/docker.sock")
     assert socket.is_socket

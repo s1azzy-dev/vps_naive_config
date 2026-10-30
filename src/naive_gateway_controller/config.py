@@ -127,7 +127,7 @@ class GatewaySettings(BaseSettings):
         except ValueError:
             return _validate_hostname(value, require_dot=False)
         if address.version != 4:
-            raise ValueError("MVP requires an IPv4 address or hostname with IPv4")
+            raise ValueError("Gateway requires an IPv4 address or hostname with IPv4")
         return str(address)
 
     @field_validator("vps_port")

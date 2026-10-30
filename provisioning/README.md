@@ -1,111 +1,103 @@
-# Текущий контракт
+# Устройство Ansible и тестов
 
-MVP: Ubuntu 26.04 LTS amd64, IPv4-only, без DOMAIN AAAA. Debian Molecule ниже —
-локальный test fixture, не дополнительная production платформа. Актуальные
-решения и отложенные VPS-gates — в [плане](../docs/ansible-provisioning-plan.md).
+Пошаговая установка, схема, все настройки и команды находятся в
+[основном README](../README.md). Здесь описаны файлы provisioning и проверки.
+Production target: Ubuntu 26.04 LTS amd64, IPv4.
 
-# Ansible provisioning
+## Что запускается
 
-Локальная и Molecule-часть фаз 4–6 реализует `make bootstrap`, роли
-`bootstrap`/`user`/`ssh`/`firewall`/`docker`, idempotence,
-validate-before-reload, точный UFW/`DOCKER-USER` allowlist и безопасные Docker
-publication defaults. Полные Gates 4–6 остаются открытыми до reconnect,
-lockout-negative, systemd/reboot и внешнего port-scan E2E на disposable VM/VPS.
-Gateway deployment реализуется ролью `naive_gateway` и командой `make deploy`.
-`make provision` объединяет bootstrap, deploy и `verify`; `make credentials`
-выводит действующие credentials в интерактивном терминале.
+Controller передаёт single-host inventory и runtime variables при запуске
+Ansible; `inventory/empty.yml` не содержит адресов/секретов. Конфигурация
+`ansible.cfg` задаёт project-local roles, collections, cache и SSH policy.
 
-## Gateway deployment
+| Playbook | Порядок действий |
+| --- | --- |
+| `playbooks/bootstrap.yml` | prerequisites → user → managed SSH/sudo → SSH hardening → firewall |
+| `playbooks/deploy.yml` | ownership/sudo → facts → Docker → gateway release/activation |
+| `playbooks/verify.yml` | ownership/SSH → UFW/ingress → permissions/runtime → installed release/image → real ports → HTTPS/proxy |
+| `playbooks/restore.yml` | ownership/sudo → Docker → acceptance tools → backup transfer → restore |
 
-Controller выполняет read-only preflight, требует managed SSH и запрашивает
-текущий sudo password. Ansible проверяет sudo с новым timestamp до изменений,
-проверяет Docker/порты и получает указанный source ref. Секреты передаются через
-тот же inherited pipe, что и в bootstrap.
+| Role / файл | Ответственность |
+| --- | --- |
+| `roles/bootstrap` | Python/sudo prerequisites, ОС/архитектура/часы |
+| `roles/user` | account, один ключ, ownership marker; пароль задаётся только при создании |
+| `roles/ssh` | Проверка всей SSH config, drop-in, reload и восстановление при ошибке |
+| `roles/ssh_policy` | Общая проверка effective `sshd -T -C` для root/managed контекстов |
+| `roles/firewall` | UFW и IPv4/IPv6 Docker ingress; выбран только IPv4 endpoint |
+| `roles/docker` | Официальный apt repository, daemon config, service и ingress boundary |
+| `roles/naive_gateway` | Проверка входов → `release.yml` → `credentials.yml` → `activate.yml`; diagnostics при отказе |
+| `vars/docker_ingress.yml` | Единый allowlist для firewall templates, Docker role и verify |
+| `scripts/runtime_state.py` | Приватный snapshot, атомарные env/current, commit/recover runtime |
 
-`/opt/naive-gateway/repository` служит source checkout. Активные bind mounts
-указывают на отдельный snapshot `releases/<commit>`; `current` меняется после
-успешной приёмки. Кандидат получает собственный image tag. До активации выполняются
-проверка Compose boundary, build и `caddy validate` без production certificate
-volumes. Существующий сервис при ошибке этих проверок не заменяется.
+Повторные проверки перед изменением кандидата и после запуска сервиса проверяют
+разные состояния. SSH reload выполняется внутри recovery block; Docker/UFW
+handlers срабатывают при изменении конфигурации. Неиспользуемых SSH handlers нет.
+Пути установки фиксированы; test-only switches не являются поддержкой других ОС.
 
-`gateway.env.pending` хранит подготовленные credentials с mode `0600`, чтобы
-повтор после прерывания не генерировал их заново. Существующий `gateway.env` имеет
-приоритет; явная пара из controller config заменяет credentials. После validation
-runtime env записывается атомарно, Compose ожидает health, затем выполняются
-public HTTPS и `check-server.sh`. При ошибке активации надо исправить причину и
-повторить `make deploy`; deployment возвращает предыдущие env/release/container. При прерывании следующий
-запуск сначала восстанавливает snapshot из `deployment-recovery`; при ошибке
-самого recovery snapshot сохраняется и требуется диагностика.
+## Секреты и границы
 
-Molecule использует отдельный Git fixture runtime-файлов этапа 7, настоящий
-production Caddy image и local issuer. Он проверяет failed-first retry,
-идемпотентность, отклонение invalid Caddy update, сохранение credentials и смену
-source ref. Это не подтверждает public ACME и внешний acceptance.
+Sudo passwords передаются через inherited `/dev/fd` pipe, не через argv,
+environment или временный файл. Читающие/генерирующие/записывающие секреты tasks
+имеют `no_log`; `display_args_to_stdout = False` скрывает аргументы в headings.
+Private keys и plaintext passwords запрещены в tracked inventory/vars/tasks.
+Callback, экспортирующий payload, не входит в проект.
 
-`make verify` проверяет SSH, UFW, Docker ingress, права runtime файла, состояние
-службы, commit/ref, фактические опубликованные порты и HTTPS/proxy; конфигурацию
-сервера он не меняет. Для получения credentials controller читает runtime env
-по SSH под sudo: пароль передаётся только через stdin, а результат печатается
-только в интерактивном терминале. Изменения этапов 8–11 ещё не прошли gates.
+UFW защищает host services. Docker управляет NAT/forwarding, поэтому отдельный
+`DOCKER-USER` allowlist допускает к Docker bridges только original host TCP
+ports 80/443 и established traffic. Обе address families защищены, хотя endpoint
+IPv4-only. Неявные bridge publications bind-ятся к loopback; direct routing
+выключен. Host/macvlan/ipvlan, Swarm и Docker socket mounts не используются.
 
-## Граница firewall
-
-- UFW защищает host services и разрешает только настроенный SSH TCP port,
-  `80/tcp` и `443/tcp`; `443/udp` не открывается.
-- Docker управляет NAT/forwarding, поэтому Ansible до его установки добавляет
-  отдельную IPv4/IPv6 policy в `DOCKER-USER`: established traffic возвращается,
-  к Docker bridges допускаются только original host TCP ports 80/443, остальное
-  ingress к `docker0`/`br+` отбрасывается.
-- Docker сохраняет firewall management, использует backend `iptables`, direct
-  routing выключен, а неявные user-defined bridge publications по умолчанию
-  bind-ятся к `127.0.0.1`. Compose публично объявляет только IPv4 TCP 80/443.
-- Provider firewall полезен как независимый defense-in-depth, но не является
-  предусловием: текущий хостер его не предоставляет, поэтому enforcement должен
-  быть самодостаточным внутри VPS.
-- Host/macvlan/ipvlan networking, Swarm, direct routing и application mounts
-  Docker socket не входят в допустимую архитектуру.
-- После deployment boundary подтверждается external sentinel/port scan на
-  disposable VM/VPS; production VPS для destructive validation не используется.
-
-## Правила секретов
-
-- plaintext passwords и private keys запрещены в tracked inventory, variable и task files;
-- sudo password существует только в памяти controller/Ansible process и передаётся
-  через inherited `/dev/fd` pipe, не через environment, argv или временный файл;
-- остальные чувствительные значения передаются только через runtime variables/templates
-  либо Ansible Vault;
-- каждая task, которая читает, генерирует, хеширует или записывает password,
-  private key либо Naive credentials, обязана иметь `no_log: true`;
-- `display_args_to_stdout = False` запрещает добавлять module arguments к task
-  headings;
-- pytest policy tests блокируют plaintext secrets и private keys до запуска
-  playbook;
-- ansible-lint с профилем `production` проверяет schema, включая role
-  `meta/argument_specs.yml`;
-- callback, пишущий task payload в файл или внешний сервис, не включается без
-  отдельного security review.
-
-## Проверки
-
-Локально CI-контракты воспроизводятся командами:
+## Локальные проверки и CI
 
 ```bash
 make tooling
-make lint
+REQUIRE_SHELLCHECK=1 make lint
 make test
 make molecule
 ```
 
-Molecule использует privileged disposable Debian 12 container, устанавливает
-официальные Docker packages, запускает nested daemon и проверяет effective
-loopback bind, UFW reload, Docker restart, exact chains и negative adoption.
-Это не заменяет systemd boot и внешний network E2E на disposable VM/VPS.
+Lint проверяет Python/types, shell и Ansible syntax/production profile.
+Pytest проверяет controller, secrets, recovery и backup/restore; scoped release
+checks выполняют настоящие задачи `verify.yml` на временных файлах с Docker/Git
+заглушками. Для них Ansible должен иметь доступ к локальному RPC/socket.
 
-GitHub Actions отдельно выполняет полный quality gate, pytest на Python
-3.14 и Docker/Caddy runtime smoke. Workflow не запускает `preflight` и не
-подключается к VPS.
+Molecule создаёт **privileged disposable Debian 12 container**: настоящий sshd,
+UFW, Docker packages и nested daemon. `converge.yml` применяет host roles,
+`side_effect.yml` проверяет негативные случаи и firewall persistence, подключает
+`audit.yml`, `deployment.yml` и `audit-runtime.yml` для deployment/recovery/rotation.
+Testinfra проверяет итоговое состояние. Причина ожидаемого отказа должна
+подтверждаться; произвольная ошибка не считается успешным negative test.
 
-Для локального Docker с отдельным CLI context (например, OrbStack) Python SDK
-может потребовать явный сокет: `DOCKER_HOST="$(docker context inspect --format '{{.Endpoints.docker.Host}}')" make molecule`.
-Тестовый daemon ограничен watchdog на 2 часа; CI timeout остаётся 20 минут,
-а обычное завершение сценария удаляет весь disposable instance.
+Debian — только fixture, не production support. Из-за отсутствия systemd внутри
+контейнера service management заменяется явным запуском daemon. Watchdog — 2 часа,
+обычный сценарий заканчивается destroy; CI job ограничен 20 минутами.
+Для отдельного Docker context Python SDK может требовать явный socket:
+
+```bash
+DOCKER_HOST="$(docker context inspect --format '{{.Endpoints.docker.Host}}')" make molecule
+```
+
+Отдельный Caddy smoke использует production Dockerfile/Caddyfile/site и local
+issuer вместо публичного ACME. В корне проекта создайте временный env и соберите image:
+
+```bash
+smoke_env=$(mktemp)
+chmod 600 "$smoke_env"
+printf '%s\n' 'DOMAIN=smoke.localhost' 'ACME_EMAIL=ci@example.com' \
+  'NAIVE_USER=smoke-user' 'NAIVE_PASSWORD=smoke-password' > "$smoke_env"
+docker compose --env-file versions.env --env-file "$smoke_env" -f compose.yml build
+rm -f "$smoke_env"
+./tests/smoke-local.sh
+```
+
+Временные значения тестовые, `.env` владельца не используется. Smoke выбирает
+image по `versions.env`; `SMOKE_IMAGE` позволяет явно выбрать другой собранный
+image. Проверяются site, sitemap/robots, TLS/HTTP2, CONNECT с credentials и отказ
+без них, отсутствие proxy destinations в логах. Тестовые containers/files удаляются.
+
+GitHub Actions отдельно запускает lint, pytest, Molecule и Caddy smoke, без VPS
+credentials. Проверки source config и настоящего runtime сохраняют разные границы;
+дополнительных reusable workflows/artifact pipelines для объединения build нет.
+Контейнерные результаты не подтверждают Ubuntu systemd/reboot, внешний port scan
+и публичный ACME. Открытая приёмка — в [текущем плане](../docs/ansible-provisioning-plan.md).

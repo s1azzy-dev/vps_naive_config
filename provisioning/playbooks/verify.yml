@@ -121,8 +121,6 @@
         follow: false
       loop:
         - "{{ verify_release_root }}"
-        - "{{ verify_release_root }}/repository"
-        - "{{ verify_release_root }}/current"
         - "{{ verify_runtime_env }}"
         - /var/run/docker.sock
       register: verify_paths
@@ -133,19 +131,14 @@
           - verify_paths.results[0].stat.isdir | default(false)
           - verify_paths.results[0].stat.uid == 0
           - verify_paths.results[0].stat.mode in ['0700', '0750', '0755']
-          - verify_paths.results[1].stat.isdir | default(false)
+          - verify_paths.results[1].stat.isreg | default(false)
           - verify_paths.results[1].stat.uid == 0
-          - verify_paths.results[1].stat.mode in ['0700', '0750', '0755']
-          - verify_paths.results[2].stat.islnk | default(false)
+          - verify_paths.results[1].stat.gid == 0
+          - verify_paths.results[1].stat.mode == '0600'
+          - verify_paths.results[2].stat.issock | default(false)
           - verify_paths.results[2].stat.uid == 0
-          - verify_paths.results[3].stat.isreg | default(false)
-          - verify_paths.results[3].stat.uid == 0
-          - verify_paths.results[3].stat.gid == 0
-          - verify_paths.results[3].stat.mode == '0600'
-          - verify_paths.results[4].stat.issock | default(false)
-          - verify_paths.results[4].stat.uid == 0
-          - verify_paths.results[4].stat.gr_name == 'docker'
-          - verify_paths.results[4].stat.mode == '0660'
+          - verify_paths.results[2].stat.gr_name == 'docker'
+          - verify_paths.results[2].stat.mode == '0660'
         fail_msg: Deployment paths or runtime credentials have unsafe ownership or mode.
         quiet: true
 
@@ -172,52 +165,79 @@
       no_log: true
       when: verify_naive_user | length > 0
 
-    - name: Read deployed commit
-      ansible.builtin.command:
-        argv: [git, -C, "{{ verify_release_root }}/repository", rev-parse, HEAD]
-      register: verify_commit
-      changed_when: false
+    - name: Verify the installed release without contacting its source repository
+      tags: [release]
+      block:
+        - name: Inspect the active release pointer
+          ansible.builtin.stat:
+            path: "{{ verify_release_root }}/current"
+            follow: false
+          register: verify_current
 
-    - name: Read configured repository URL privately
-      ansible.builtin.command:
-        argv: [git, -C, "{{ verify_release_root }}/repository", remote, get-url, origin]
-      register: verify_origin
-      changed_when: false
-      no_log: true
+        - name: Require a pointer to a managed commit directory
+          ansible.builtin.assert:
+            that:
+              - verify_current.stat.islnk | default(false)
+              - verify_current.stat.lnk_source is match('^' ~ verify_release_root ~ '/releases/[0-9a-f]{40}$')
+            fail_msg: Current must point to a managed release directory.
+            quiet: true
 
-    - name: Verify repository, commit and active release
+        - name: Read the installed release completion marker
+          ansible.builtin.slurp:
+            src: "{{ verify_release_root }}/current/.release-complete"
+          register: verify_release_marker
+
+        - name: Read the installed commit from the marker
+          ansible.builtin.set_fact:
+            verify_commit: "{{ verify_release_marker.content | b64decode | trim }}"
+
+        - name: Require a consistent installed commit and any explicitly requested commit
+          ansible.builtin.assert:
+            that:
+              - verify_commit is match('^[0-9a-f]{40}$')
+              - verify_current.stat.lnk_source == verify_release_root ~ '/releases/' ~ verify_commit
+              - not (verify_ref is match('^[0-9a-f]{40}$')) or verify_commit == verify_ref
+            fail_msg: Installed release marker, current pointer or requested commit disagree.
+            quiet: true
+
+        - name: Find containers belonging to the gateway project
+          ansible.builtin.command:
+            argv:
+              - docker
+              - ps
+              - --all
+              - --quiet
+              - --filter
+              - label=com.docker.compose.project=naive-gateway
+          register: verify_containers
+          changed_when: false
+
+        - name: Require exactly one gateway container
+          ansible.builtin.assert:
+            that: verify_containers.stdout_lines | length == 1
+            quiet: true
+
+        - name: Read the running gateway image
+          ansible.builtin.command:
+            argv:
+              - docker
+              - inspect
+              - --format
+              - '{{ "{{.Config.Image}}" }}'
+              - "{{ verify_containers.stdout_lines[0] }}"
+          register: verify_container_image
+          changed_when: false
+
+        - name: Require the running image to match the installed release
+          ansible.builtin.assert:
+            that: verify_container_image.stdout == 'naive-gateway-caddy:git-' ~ verify_commit
+            fail_msg: Running gateway image does not match the installed release.
+            quiet: true
+
+    - name: Require root ownership of the active release pointer
       ansible.builtin.assert:
-        that:
-          - verify_origin.stdout == verify_repository
-          - verify_commit.stdout is match('^[0-9a-f]{40}$')
-          - verify_paths.results[2].stat.lnk_source == verify_release_root ~ '/releases/' ~ verify_commit.stdout
-          - not (verify_ref is match('^[0-9a-f]{40}$')) or verify_commit.stdout == verify_ref
+        that: verify_current.stat.uid == 0
         quiet: true
-      no_log: true
-
-    - name: Read the specified branch or tag from origin
-      ansible.builtin.command:
-        argv:
-          - git
-          - -C
-          - "{{ verify_release_root }}/repository"
-          - ls-remote
-          - --exit-code
-          - origin
-          - "refs/heads/{{ verify_ref }}"
-          - "refs/tags/{{ verify_ref }}"
-          - "refs/tags/{{ verify_ref }}^{}"
-      register: verify_remote_ref
-      changed_when: false
-      no_log: true
-      when: not (verify_ref is match('^[0-9a-f]{40}$'))
-
-    - name: Require the active commit to match the requested remote ref
-      ansible.builtin.assert:
-        that: verify_remote_ref.stdout is search('(?m)^' ~ verify_commit.stdout ~ '\s')
-        quiet: true
-      no_log: true
-      when: not (verify_ref is match('^[0-9a-f]{40}$'))
 
     - name: Inspect the running Compose configuration privately
       ansible.builtin.command:
@@ -258,6 +278,7 @@
       ansible.builtin.assert:
         that:
           - verify_compose_json.services.keys() | list == ['caddy']
+          - verify_compose_json.services.caddy.image == 'naive-gateway-caddy:git-' ~ verify_commit
           - verify_compose_json.services.caddy.ports | length == 2
           - verify_compose_json.services.caddy.ports | map(attribute='host_ip') | unique | list == ['0.0.0.0']
           - verify_compose_json.services.caddy.ports | map(attribute='protocol') | unique | list == ['tcp']
@@ -269,39 +290,6 @@
       vars:
         verify_compose_json: "{{ verify_compose.stdout | from_json }}"
       no_log: true
-
-    - name: Find containers belonging to the gateway project
-      ansible.builtin.command:
-        argv:
-          - docker
-          - ps
-          - --all
-          - --quiet
-          - --filter
-          - label=com.docker.compose.project=naive-gateway
-      register: verify_containers
-      changed_when: false
-
-    - name: Require exactly one gateway container
-      ansible.builtin.assert:
-        that: verify_containers.stdout_lines | length == 1
-        quiet: true
-
-    - name: Read the running gateway image
-      ansible.builtin.command:
-        argv:
-          - docker
-          - inspect
-          - --format
-          - '{{ "{{.Config.Image}}" }}'
-          - "{{ verify_containers.stdout_lines[0] }}"
-      register: verify_container_image
-      changed_when: false
-
-    - name: Require the running image to match the accepted release
-      ansible.builtin.assert:
-        that: verify_container_image.stdout == 'naive-gateway-caddy:git-' ~ verify_commit.stdout
-        quiet: true
 
     - name: Read the actual gateway port bindings
       ansible.builtin.command:

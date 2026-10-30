@@ -34,11 +34,9 @@ class SequencedSSHProbe:
 def valid_network(_host: str, _domain: str, _port: int, _timeout: float) -> NetworkReport:
     return NetworkReport(
         vps_ipv4=("192.0.2.10",),
-        vps_ipv6=(),
         domain_ipv4=("192.0.2.10",),
         domain_ipv6=(),
         ssh_target_reachable=True,
-        unreachable_domain_ipv6=(),
     )
 
 

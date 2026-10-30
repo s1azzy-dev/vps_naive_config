@@ -26,12 +26,6 @@ argument_specs:
         type: str
         no_log: true
         description: Optional explicit URL-safe password, paired with username.
-      naive_gateway_root:
-        type: path
-        description: Root-owned source, release and current-link directory.
-      naive_gateway_config_dir:
-        type: path
-        description: Private directory holding active and pending runtime env.
       naive_gateway_public_acceptance:
         type: bool
         description: Require public TLS and check-server; disabled only in isolated local-CA tests.

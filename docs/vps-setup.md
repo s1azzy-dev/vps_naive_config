@@ -1,95 +1,47 @@
-# Подготовка и сопровождение VPS
+# Восстановление и диагностика
 
-## Предварительные условия
+Установка, конфигурация и обычное сопровождение описаны в
+[README](../README.md). Здесь — действия при сбоях и переносе runtime.
+Не запускайте deploy, restore, backup и rotation параллельно.
 
-Целевой MVP — чистый **Ubuntu 26.04 LTS amd64**. Его реальная приёмка пока не
-выполнена. Нужны bootstrap SSH по ключу, matching DOMAIN A и отсутствие DOMAIN
-AAAA. SSH использует IPv4; его порт не может быть 80/443. Снаружи разрешены
-выбранный SSH TCP port, 80/tcp, 443/tcp. 443/udp не публикуется.
+## Сохранить backup вне VPS
 
-На controller нужны Python 3.14, Git, Make, OpenSSH и локальный checkout.
-Provider firewall опционален: Ansible сам настраивает UFW и Docker ingress.
+На VPS выполните `sudo make -C /opt/naive-gateway/current backup` и возьмите
+напечатанный путь архива. Архив содержит release, credentials, точный image и
+certificate private keys; права архива `0600`, каталога `0700`. Git config не входит.
 
-## Установка и обновление
-
-```bash
-make init
-# Заполнить .env: VPS_HOST, SSH_PRIVATE_KEY, DOMAIN, ACME_EMAIL.
-make tooling
-make provision
-```
-
-Ключи задаются абсолютными путями. SSH_PUBLIC_KEY по умолчанию равен
-SSH_PRIVATE_KEY + `.pub`. `.env` имеет mode 0600 и не копируется на VPS.
-GATEWAY_REF должен быть опубликован до deploy: рабочее дерево controller не
-передаётся на VPS. Private Git доступен root через SSH deploy key; HTTPS URL
-с userinfo (включая token-only username) и SSH URL с password запрещены. Старые backup с Git
-config следует считать содержащими credentials и хранить как секреты.
-
-Bootstrap может подключаться root либо non-root. Для non-root его существующий
-sudo password запрашивается отдельно (пустой только для bootstrap NOPASSWD).
-Новый managed password подтверждается дважды. Он проверяется прямым sudo через
-stdin после нового managed SSH, до изменения root/password доступа. Managed
-NOPASSWD не считается доказательством правильного пароля. Сохраняйте исходную
-сессию до проверки нового подключения.
-
-Conditional sshd Match, включая вложенные Include, отклоняется без автоматической
-миграции. Неуправляемый существующий user также отклоняется: другие ключи/группы
-не удаляются. Не создавайте ownership marker вручную ради обхода ошибки. Сначала
-проверьте пользователя, аварийный доступ и backup и отдельно согласуйте миграцию.
-Для новых hosts проще выбрать новое имя VPS_USER. После прерывания между созданием
-account и marker также требуется такая проверка; повтор не присваивает user молча.
-
-Provision проверяет syntax всех обязательных playbooks до SSH, затем повторно
-применяет host roles даже при готовом managed SSH. Самостоятельные команды:
+Чтобы скачать root-only архив через managed user, на VPS создайте приватную копию
+для него (замените `ARCHIVE.tar.gz` на фактическое имя):
 
 ```bash
-make check-config
-make preflight
-make bootstrap
-make deploy
-make verify
-make credentials
+sudo install -m 600 -o "$USER" -g "$(id -gn)" \
+  /var/backups/naive-gateway/ARCHIVE.tar.gz "$HOME/gateway-backup.tar.gz"
 ```
 
-Credentials читаются только через managed SSH/sudo с известным host key и
-выводятся только в интерактивный терминал. Исправный DNS gateway не требуется.
-Preflight/deploy/verify требуют корректный DOMAIN DNS. Новые SSH host keys
-запоминаются через accept-new; изменившийся ключ не принимается автоматически.
-Проверьте первый fingerprint по независимому каналу.
-
-При пустой паре NAIVE_USER/NAIVE_PASSWORD deploy сохраняет runtime credentials;
-явная пара применяется при каждом deploy. После rotation очистите или обновите
-оба значения на controller, иначе следующий deploy применит старую пару.
-
-## Серверные операции
+На компьютере, в каталоге проекта:
 
 ```bash
-sudo make -C /opt/naive-gateway/current status
-sudo make -C /opt/naive-gateway/current check
-sudo make -C /opt/naive-gateway/current logs
-sudo make -C /opt/naive-gateway/current validate
-sudo make -C /opt/naive-gateway/current backup
-sudo make -C /opt/naive-gateway/current rotate-credentials
+scp -P 22 -i ~/.ssh/naive_vps slazzy@203.0.113.10:gateway-backup.tar.gz backups/
+chmod 600 backups/gateway-backup.tar.gz
 ```
 
-Не выполняйте deploy, restore, backup и rotation параллельно. Backup имеет mode
-0600 в каталоге `/var/backups/naive-gateway/` с mode 0700. Он содержит runtime env,
-файлы release, точный image и оба Caddy volumes с certificate private keys. Git
-config в новые backup не входит. Отдельно перенесите архив в защищённое хранилище.
+Порт/ключ/user/IP замените своими. Убедитесь, что копия скачана полностью;
+храните её как секрет. Старый VPS и архив сохраняйте до успешного восстановления.
 
 ## Автономное восстановление без исходного Git
 
 Сохраните старый VPS и архив до полной проверки нового. На controller используйте
 уже имеющийся checkout с этой версией restore. Подготовьте `.env` нового VPS:
-DOMAIN должен совпадать с сохранённым в backup, а A-запись — указывать на новый
-VPS; AAAA отсутствует. Это перенос того же endpoint и credentials. Смену domain
+DOMAIN и ACME_EMAIL должны совпадать с сохранёнными в backup. A-запись должна указывать на новый
+VPS; AAAA отсутствует. Явную пару NAIVE_USER/NAIVE_PASSWORD очистите либо согласуйте
+с backup. Это перенос того же endpoint и credentials. Смену domain
 выполните последующим обычным deploy, когда source Git снова доступен.
 
 ```bash
 chmod 600 /absolute/path/backup.tar.gz
 make bootstrap
 make restore BACKUP_FILE=/absolute/path/backup.tar.gz
+make verify
 make credentials
 ```
 
@@ -100,11 +52,11 @@ image. Restore проверяет image identity, archive paths, domain, health 
 HTTPS/proxy. Загрузка apt packages/Ansible dependencies для подготовки нового
 host может требовать сеть; автономность относится к исходникам и runtime образу.
 
-Runtime acceptance после restore выполняется самим check-server.sh. Полный
-`make verify` также сверяет Git checkout/origin/ref и требует source checkout.
-До возвращения Git используйте `sudo make -C /opt/naive-gateway/current check`;
-после восстановления Git обычный `make deploy` создаст checkout, затем доступен
-полный `make verify`. Backup manifest/image identity не объявляются проверкой Git origin.
+Runtime acceptance после restore выполняет `check-server.sh`. После него
+можно сразу запустить `make verify`: source checkout на новом VPS и доступ к
+Git origin не нужны. Проверяются marker/current/image и фактический сервис.
+При явном GATEWAY_REF как commit он должен совпадать с backup; branch/tag не
+проверяются через origin. Backup manifest и marker не доказывают происхождение Git.
 
 Restore отказывается перезаписывать существующие gateway containers, volumes,
 env/current или незавершённый recovery. Не удаляйте их вслепую ради повторного
@@ -144,5 +96,31 @@ Rotation при ошибке возвращает прежний env и пере
 Файлы `gateway.env.rotate.*` после аварийного завершения сохраняйте до проверки
 актуальных credentials; затем удаляйте только подтверждённо лишние копии.
 
-Реальные SSH/lockout, public ACME/CONNECT, external sentinel/scan, systemd/reboot,
-restore и rotation на Ubuntu VPS оставлены финальными gates по решению владельца.
+## Отказы доступа и конфигурации
+
+| Отказ | Что проверить / как продолжить |
+| --- | --- |
+| Tooling: command cannot run | Проверить `command -v git` и `git --version` (аналогично для указанной команды), архитектуру executable и PATH; выбрать рабочий binary в PATH запуска Make |
+| Host key changed | Сверить новый fingerprint через консоль провайдера. Только после подтверждения удалить старую запись из `provisioning/known_hosts` и повторить preflight |
+| Managed sudo failed | Использовать действующий пароль, проверить sudo rules; NOPASSWD не заменяет password proof |
+| Existing account / Docker / UFW not managed | Не создавать marker вручную и не стирать чужие данные. Проверить аварийный доступ и принадлежность ресурсов; для чистого VPS выбрать новое имя account или пересоздать VPS |
+| Account создан, marker ещё нет | Рассматривать как существующий неуправляемый account, проверить его отдельно; retry не присваивает его молча |
+| SSH Match / nested Include rejected | Произвольная conditional policy не мигрируется. Изучить полную SSH config и доступ через консоль до ручной миграции |
+| Port conflict | Через `sudo ss -ltnp` и `sudo docker ps` найти владельца TCP 80/443; затем устранить конфликт и повторить deploy |
+| DNS / HTTPS / proxy acceptance | Проверить DOMAIN A/AAAA, порты, сертификат, Caddy logs и доступность внешних test targets; transport error не доказывает отказ anonymous proxy |
+
+Новое доверие SSH после пересоздания VPS устанавливается отдельно от переноса
+приложения. Например, удалить **проверенную устаревшую** запись стандартного порта:
+
+```bash
+ssh-keygen -R 203.0.113.10 -f provisioning/known_hosts
+make preflight
+```
+
+Для нестандартного порта используйте `[203.0.113.10]:2222` вместо IP.
+Credentials можно прочитать через `make credentials`, даже если DNS gateway
+неисправен: нужны managed SSH, sudo и уже известный host key.
+
+Реальные SSH/lockout, public ACME/CONNECT, external scan, systemd/reboot и
+restore/rotation на Ubuntu VPS пока не проверены; [приёмка](ansible-provisioning-plan.md)
+остаётся открытой.

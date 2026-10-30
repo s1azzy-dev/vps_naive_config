@@ -11,7 +11,6 @@ from naive_gateway_controller.config import load_settings
 from naive_gateway_controller.errors import ControllerError
 from naive_gateway_controller.preflight import run_preflight
 from naive_gateway_controller.provisioning import (
-    BootstrapOutcome,
     read_credentials,
     run_bootstrap,
     run_deploy,
@@ -49,7 +48,7 @@ def _print_preflight(config_path: Path) -> None:
     print("Configuration: OK")
     report = run_preflight(settings, project_root() / "provisioning/known_hosts")
     network = report.network
-    print(f"VPS addresses: {', '.join((*network.vps_ipv4, *network.vps_ipv6))}")
+    print(f"VPS IPv4: {', '.join(network.vps_ipv4)}")
     print(f"DOMAIN A: {', '.join(network.domain_ipv4)}")
     print(f"DOMAIN AAAA: {', '.join(network.domain_ipv6) or 'none'}")
     print(f"SSH port {settings.vps_port}: reachable")
@@ -62,11 +61,8 @@ def _print_preflight(config_path: Path) -> None:
 def _print_bootstrap(config_path: Path) -> None:
     settings = load_settings(config_path)
     print("Configuration: OK")
-    outcome = run_bootstrap(settings)
-    if outcome is BootstrapOutcome.SKIPPED:
-        print("Bootstrap: SKIP (managed host already hardened)")
-    else:
-        print("Bootstrap: PASS")
+    run_bootstrap(settings)
+    print("Bootstrap: PASS")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

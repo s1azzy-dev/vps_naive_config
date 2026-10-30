@@ -7,9 +7,13 @@ Caddy, forwardproxy, Docker, Python/Ansible и выбранных base images.
 1. В `versions.env` указать точную Caddy version и полный reviewed forwardproxy
    commit. Проверить существование revision, совместимость Go и Caddy API, изменения
    authentication, CONNECT, probe resistance и logging.
-2. Для Python/Ansible изменить точные pins в `pyproject.toml` и соответствующие
-   EXPECTED_VERSIONS в controller; обновить `uv.lock`, не редактируя lock вручную.
-   Для collections синхронно изменить `provisioning/requirements.yml` и contract tests.
+2. Для Python/Ansible изменить pins в `pyproject.toml` и обновить `uv.lock` через
+   `.venv/bin/uv lock`, не редактируя lock вручную. Tooling читает pins из pyproject;
+   второй список в controller/tests не поддерживается. Версию bootstrap uv также
+   согласовать в Makefile и CI: они нужны до установки environment.
+   Для collections менять только `provisioning/requirements.yml`; tooling сверяет
+   установленные versions с этим файлом. Caddy/forwardproxy берутся из `versions.env`
+   для Compose build и smoke; одинаковые version literals в тесты не добавлять.
 3. Выполнить `make tooling`, `make lint`, `make test`, `make molecule` и
    `./tests/smoke-local.sh`. Проверить module presence, legitimate CONNECT,
    anonymous rejection, TLS/HTTP2 и отсутствие destinations в логах.
@@ -21,5 +25,5 @@ Caddy, forwardproxy, Docker, Python/Ansible и выбранных base images.
 Docker base images сейчас закреплены version tags, не digest; apt-пакеты Docker
 не закреплены точными версиями. Frozen uv/collection pins и source commits не дают
 побитовой воспроизводимости всего VPS. Принудительное обновление base digest/apt
-policy требует отдельного решения и тех же gates. Этот порядок не является CVE
+policy требует отдельного решения и той же приёмки. Этот порядок не является CVE
 проверкой текущих зависимостей; результаты такого сканирования здесь не заявляются.
