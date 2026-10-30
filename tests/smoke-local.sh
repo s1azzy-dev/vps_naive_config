@@ -106,7 +106,6 @@ awk '{ print }
   /probe_resistance/ { print "        acl {\n            allow 127.0.0.1\n        }" }
 ' "$SMOKE_CADDYFILE" > "$TMP_DIR/idle.Caddyfile"
 docker cp "$TMP_DIR/idle.Caddyfile" "$CONTAINER:/tmp/idle.Caddyfile" >/dev/null
-docker exec "$CONTAINER" caddy fmt --overwrite /tmp/idle.Caddyfile
 docker exec "$CONTAINER" caddy reload --config /tmp/idle.Caddyfile --adapter caddyfile >/dev/null
 cat > "$TMP_DIR/idle-origin.sh" <<'ORIGIN'
 #!/bin/sh
